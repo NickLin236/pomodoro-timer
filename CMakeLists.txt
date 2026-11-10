@@ -11,6 +11,11 @@ add_library(pomodoro_core
     src/persistence/state_store.cpp
     src/app/controller.cpp)
 target_include_directories(pomodoro_core PUBLIC include)
+if(WIN32)
+    # Apply to every consumer, including tests that include windows.h directly.
+    # MSVC otherwise expands Win32's max macro in numeric_limits<T>::max().
+    target_compile_definitions(pomodoro_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 if(MSVC)
     target_compile_options(pomodoro_core PRIVATE /W4 /permissive- /utf-8)
 else()
@@ -23,8 +28,8 @@ if(WIN32)
         src/platform/windows_shell.cpp src/platform/clock.cpp resources/pomodoro.rc)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
         uuid advapi32 user32 gdi32)
-    target_compile_definitions(Pomodoro PRIVATE UNICODE _UNICODE NOMINMAX
-        WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+    target_compile_definitions(Pomodoro PRIVATE UNICODE _UNICODE
+        _WIN32_WINNT=0x0A00 WINVER=0x0A00)
     target_include_directories(Pomodoro PRIVATE resources)
     if(MSVC)
         target_compile_options(Pomodoro PRIVATE /W4 /permissive- /utf-8)
@@ -58,8 +63,8 @@ if(BUILD_TESTING)
             src/platform/windows_shell.cpp src/platform/clock.cpp)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32
             ole32 uuid advapi32 user32 gdi32)
-        target_compile_definitions(windows_ui_tests PRIVATE UNICODE _UNICODE NOMINMAX
-            WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+        target_compile_definitions(windows_ui_tests PRIVATE UNICODE _UNICODE
+            _WIN32_WINNT=0x0A00 WINVER=0x0A00)
         if(MSVC)
             target_compile_options(windows_ui_tests PRIVATE /W4 /permissive- /utf-8)
         elseif(MINGW)
