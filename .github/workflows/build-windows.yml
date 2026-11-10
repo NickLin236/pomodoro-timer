@@ -1,0 +1,129 @@
+name: Build Windows artifacts
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Optional vMAJOR.MINOR.PATCH tag; must match all application versions.
+        required: false
+        default: ''
+        type: string
+    outputs:
+      version:
+        description: Application version from CMake.
+        value: ${{ jobs.windows.outputs.version }}
+      commit:
+        description: Exact source commit built.
+        value: ${{ jobs.windows.outputs.commit }}
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Validate application and release versions
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cmake = Get-Content CMakeLists.txt -Raw
+          $match = [regex]::Match($cmake, '(?m)^project\(Pomodoro VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX\)')
+          if (-not $match.Success) { throw 'Cannot read application version from CMakeLists.txt.' }
+          $version = $match.Groups[1].Value
+          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cne "v$version") {
+            throw "Release tag must be v$version to match CMakeLists.txt."
+          }
+          $resources = Get-Content resources/pomodoro.rc -Raw
+          $numericVersion = $version.Replace('.', ',') + ',0'
+          foreach ($field in @('FILEVERSION', 'PRODUCTVERSION')) {
+            $match = [regex]::Match($resources, "(?m)^\s*$field\s+([0-9,]+)\s*$")
+            if (-not $match.Success -or $match.Groups[1].Value -cne $numericVersion) {
+              throw "resources/pomodoro.rc $field must be $numericVersion."
+            }
+          }
+          foreach ($field in @('FileVersion', 'ProductVersion')) {
+            $match = [regex]::Match($resources, 'VALUE\s+"' + $field + '",\s+"([^"\r\n]+)"')
+            $expected = if ($field -eq 'FileVersion') { "$version.0\0" } else { "$version\0" }
+            if (-not $match.Success -or $match.Groups[1].Value -cne $expected) {
+              throw "resources/pomodoro.rc $field must be $expected."
+            }
+          }
+          [xml]$manifest = Get-Content resources/pomodoro.manifest -Raw
+          if ($manifest.assembly.assemblyIdentity.version -cne "$version.0") {
+            throw "resources/pomodoro.manifest assembly version must be $version.0."
+          }
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not identify source commit.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+
+      - name: Configure MSVC x64 with static CRT
+        run: cmake --preset windows-msvc
+
+      - name: Build Release application and tests
+        run: cmake --build --preset windows-release --parallel
+
+      - name: Run all four Windows test suites
+        run: ctest --preset windows-release
+
+      - name: Collect standalone executable, ZIP, provenance, and checksums
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.version.outputs.commit }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cpack --config build/windows-msvc/CPackConfig.cmake -C Release -B build/release
+          if ($LASTEXITCODE -ne 0) { throw 'Offline ZIP packaging failed.' }
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item build/windows-msvc/Release/Pomodoro.exe release/Pomodoro.exe
+          $archiveName = "Pomodoro-$env:APP_VERSION-windows-x64.zip"
+          Copy-Item (Join-Path build/release $archiveName) (Join-Path release $archiveName)
+          $metadata = @{
+            version = $env:APP_VERSION
+            commit = $env:SOURCE_COMMIT
+            tag = $env:RELEASE_TAG
+            toolchain = 'MSVC x64 Release, static CRT'
+            tested = @('timer_engine', 'state_store', 'controller', 'windows_ui')
+          } | ConvertTo-Json
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          [IO.File]::WriteAllText((Join-Path $PWD release/BUILDINFO.json), $metadata + "`n", $utf8)
+          $checksums = foreach ($name in @('Pomodoro.exe', $archiveName, 'BUILDINFO.json')) {
+            $hash = (Get-FileHash (Join-Path release $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          # Linux publishes the artifact; GNU sha256sum treats a CRLF's CR as
+          # part of the filename, so use explicit LF lines on Windows too.
+          [IO.File]::WriteAllText((Join-Path $PWD release/SHA256SUMS.txt), ($checksums -join "`n") + "`n", $utf8)
+
+      - name: Upload downloadable Windows files
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pomodoro-windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-test-logs
+          path: build/windows-msvc/Testing/Temporary/
+          if-no-files-found: ignore
+          retention-days: 7

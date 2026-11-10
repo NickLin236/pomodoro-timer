@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify and build release
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      release-tag: ${{ github.ref_name }}
+
+  publish:
+    name: Publish directly downloadable executable
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download tested Windows files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pomodoro-windows-x64
+          path: release
+
+      - name: Verify release files
+        working-directory: release
+        run: sha256sum --check SHA256SUMS.txt
+
+      - name: Create or resume release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          APP_VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="Pomodoro-${APP_VERSION}-windows-x64.zip"
+          for file in Pomodoro.exe "$archive" BUILDINFO.json SHA256SUMS.txt; do
+            test -s "$file"
+          done
+          python3 - <<'PY'
+          import json, os
+          with open('BUILDINFO.json', encoding='utf-8') as source:
+              info = json.load(source)
+          assert info['commit'] == os.environ['SOURCE_COMMIT'], 'Artifact source commit mismatch'
+          assert info['version'] == os.environ['APP_VERSION'], 'Artifact version mismatch'
+          assert info['tag'] == os.environ['RELEASE_TAG'], 'Artifact tag mismatch'
+          PY
+
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" --json isDraft,assets > existing-release.json 2>/dev/null; then
+            if python3 -c 'import json,sys; sys.exit(0 if json.load(open("existing-release.json"))["isDraft"] else 1)'; then
+              echo 'Resuming unpublished draft release.'
+            else
+              # A retry of an already completed run never replaces public files.
+              gh release download "$RELEASE_TAG" --repo "$RELEASE_REPO" --pattern BUILDINFO.json --dir published
+              python3 - <<'PY'
+          import json, os
+          with open('published/BUILDINFO.json', encoding='utf-8') as source:
+              info = json.load(source)
+          assert info['commit'] == os.environ['SOURCE_COMMIT'], 'Published tag uses a different source commit; create a new version'
+          assert info['version'] == os.environ['APP_VERSION'], 'Published version mismatch'
+          with open('existing-release.json', encoding='utf-8') as source:
+              names = {asset['name'] for asset in json.load(source)['assets']}
+          expected = {'Pomodoro.exe', 'Pomodoro-' + os.environ['APP_VERSION'] + '-windows-x64.zip', 'BUILDINFO.json', 'SHA256SUMS.txt'}
+          assert expected <= names, 'Published release has missing assets; inspect it before retrying'
+          PY
+              echo 'This source version is already published; leaving its assets unchanged.'
+              exit 0
+            fi
+          else
+            cat > release-notes.md <<'NOTES'
+          Download **Pomodoro.exe** below and run it on Windows 10 x64. No repository clone, compiler, or additional application files are required.
+
+          The ZIP is optional and includes per-user install/uninstall scripts and documentation. SHA256SUMS.txt contains file checksums; BUILDINFO.json identifies the exact source commit and automated test suites.
+
+          Built with MSVC in Release mode and tested before publication. Windows 10 shell, DPI, suspend/resume, and memory acceptance checks still require the documented manual checklist.
+          NOTES
+            gh release create "$RELEASE_TAG" --repo "$RELEASE_REPO" --verify-tag --draft \
+              --title "Pomodoro $RELEASE_TAG" --notes-file release-notes.md
+          fi
+
+          gh release upload "$RELEASE_TAG" --repo "$RELEASE_REPO" --clobber \
+            Pomodoro.exe "$archive" BUILDINFO.json SHA256SUMS.txt
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --draft=false --latest

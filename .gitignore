@@ -1,0 +1,11 @@
+/build/
+/out/
+/Testing/
+/dist/
+/.agents/
+/.aws/
+/.codex/
+*.user
+*.suo
+*.zip
+*.tmp
