@@ -24,16 +24,26 @@ endif()
 
 if(WIN32)
     enable_language(RC)
+    # Native UI executables must share the Common Controls v6 activation
+    # context, including tests. An unmanifested test defaults to Comctl32 v5.
+    function(pomodoro_embed_windows_resources target)
+        target_sources(${target} PRIVATE resources/pomodoro.rc)
+        target_include_directories(${target} PRIVATE resources)
+        if(MSVC)
+            # The resource script already embeds manifest resource #1.
+            target_link_options(${target} PRIVATE /MANIFEST:NO)
+        endif()
+    endfunction()
+
     add_executable(Pomodoro WIN32 src/ui/main_window.cpp
-        src/platform/windows_shell.cpp src/platform/clock.cpp resources/pomodoro.rc)
+        src/platform/windows_shell.cpp src/platform/clock.cpp)
+    pomodoro_embed_windows_resources(Pomodoro)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
         uuid advapi32 user32 gdi32)
     target_compile_definitions(Pomodoro PRIVATE UNICODE _UNICODE
         _WIN32_WINNT=0x0A00 WINVER=0x0A00)
-    target_include_directories(Pomodoro PRIVATE resources)
     if(MSVC)
         target_compile_options(Pomodoro PRIVATE /W4 /permissive- /utf-8)
-        target_link_options(Pomodoro PRIVATE /MANIFEST:NO)
     elseif(MINGW)
         target_compile_options(Pomodoro PRIVATE -Wall -Wextra -Wpedantic)
         target_link_options(Pomodoro PRIVATE -municode -static -static-libgcc -static-libstdc++)
@@ -61,6 +71,7 @@ if(BUILD_TESTING)
     if(WIN32)
         add_executable(windows_ui_tests tests/windows_ui_tests.cpp
             src/platform/windows_shell.cpp src/platform/clock.cpp)
+        pomodoro_embed_windows_resources(windows_ui_tests)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32
             ole32 uuid advapi32 user32 gdi32)
         target_compile_definitions(windows_ui_tests PRIVATE UNICODE _UNICODE
