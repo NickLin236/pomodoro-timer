@@ -137,12 +137,14 @@ void missingAndRoundTrips() {
     CHECK(emptyState.value.pomodoro.status == Status::Idle);
     CHECK(emptyPreferences.warning.empty());
     CHECK(emptyPreferences.value.pomodoro.focusMs == 25 * 60000);
+    CHECK(emptyPreferences.value.showTaskbarStatus);
 
     Preferences preferences;
     preferences.pomodoro = {12345, 6789, 11};
     preferences.countdownDurationMs = 12345678;
     preferences.soundEnabled = false;
     preferences.startAtSignIn = true;
+    preferences.showTaskbarStatus = false;
     preferences.backgroundMode = BackgroundMode::KeepTaskbar;
     preferences.taskbarSource = TaskbarSource::Countdown;
     fixture.store.savePreferences(preferences);
@@ -154,6 +156,7 @@ void missingAndRoundTrips() {
     CHECK(loaded.value.countdownDurationMs == 12345678);
     CHECK(!loaded.value.soundEnabled);
     CHECK(loaded.value.startAtSignIn);
+    CHECK(!loaded.value.showTaskbarStatus);
     CHECK(loaded.value.backgroundMode == BackgroundMode::KeepTaskbar);
     CHECK(loaded.value.taskbarSource == TaskbarSource::Countdown);
 
@@ -173,6 +176,46 @@ void missingAndRoundTrips() {
     CHECK(recovered.value.countdown.status == Status::Completed);
     CHECK(recovered.value.countdownNotificationSequence == 1);
     CHECK(recovered.value.countdown.transitionSequence == 1);
+}
+
+void taskbarStatusSettingsRemainBackwardCompatible() {
+    Fixture fixture;
+    Preferences preferences;
+    preferences.pomodoro = {7 * 60000, 2 * 60000, 8};
+    preferences.backgroundMode = BackgroundMode::KeepTaskbar;
+    preferences.showTaskbarStatus = false;
+    fixture.store.savePreferences(preferences);
+    const auto current = read(fixture.path / "settings.json");
+    CHECK(current.find("\"showTaskbarStatus\":false") != std::string::npos);
+
+    // Old schema-1 settings remain valid and use the new display's default.
+    const auto oldSettings = replace(current, ",\n  \"showTaskbarStatus\":false", "");
+    write(fixture.path / "settings.json", oldSettings);
+    const auto old = fixture.store.loadPreferences();
+    CHECK(old.warning.empty());
+    CHECK(!old.recoveredFromBackup);
+    CHECK(old.value.showTaskbarStatus);
+    CHECK(old.value.pomodoro.focusMs == preferences.pomodoro.focusMs);
+    CHECK(old.value.pomodoro.cycles == 8);
+    CHECK(old.value.backgroundMode == BackgroundMode::KeepTaskbar);
+
+    auto enabled = old.value;
+    fixture.store.savePreferences(enabled);
+    CHECK(fixture.store.loadPreferences().value.showTaskbarStatus);
+    enabled.showTaskbarStatus = false;
+    fixture.store.savePreferences(enabled);
+    CHECK(!fixture.store.loadPreferences().value.showTaskbarStatus);
+
+    // A malformed optional field is still an invalid document, not a default.
+    const auto validDisabled = read(fixture.path / "settings.json");
+    std::filesystem::remove(fixture.path / "settings.json.bak");
+    for (const auto invalidValue : {"1", "null", "\"false\""}) {
+        write(fixture.path / "settings.json", replace(validDisabled, "\"showTaskbarStatus\":false",
+              "\"showTaskbarStatus\":" + std::string(invalidValue)));
+        const auto invalid = fixture.store.loadPreferences();
+        CHECK(!invalid.warning.empty());
+        CHECK(!invalid.recoveredFromBackup);
+    }
 }
 
 void restartRecoveryAndPause() {
@@ -393,6 +436,7 @@ int main() {
         staleTemporaryFilesDoNotPreventSave();
         numericSerializationIgnoresUserLocale();
         missingAndRoundTrips();
+        taskbarStatusSettingsRemainBackwardCompatible();
         restartRecoveryAndPause();
         backwardClockRecoveryCanBePausedAndSaved();
         backupRecovery();

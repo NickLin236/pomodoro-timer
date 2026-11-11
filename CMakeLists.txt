@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Pomodoro VERSION 1.0.0 LANGUAGES CXX)
+project(Pomodoro VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,7 +36,8 @@ if(WIN32)
     endfunction()
 
     add_executable(Pomodoro WIN32 src/ui/main_window.cpp
-        src/platform/windows_shell.cpp src/platform/clock.cpp)
+        src/platform/windows_shell.cpp src/platform/clock.cpp
+        src/platform/taskbar_status_panel.cpp)
     pomodoro_embed_windows_resources(Pomodoro)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
         uuid advapi32 user32 gdi32)
@@ -49,7 +50,7 @@ if(WIN32)
         target_link_options(Pomodoro PRIVATE -municode -static -static-libgcc -static-libstdc++)
     endif()
     install(TARGETS Pomodoro RUNTIME DESTINATION .)
-    install(FILES README.md Pomodoro_Development_Plan.md DESTINATION .)
+    install(FILES README.md CHANGELOG.md Pomodoro_Development_Plan.md DESTINATION .)
     install(FILES Docs/Behavior.md Docs/Windows_Test_Checklist.md Docs/Validation.md
         Docs/GitHub_Releases.md DESTINATION Docs)
     install(PROGRAMS packaging/Install.ps1 packaging/Uninstall.ps1 packaging/Measure-Resources.ps1 DESTINATION .)
@@ -70,7 +71,8 @@ if(BUILD_TESTING)
     endforeach()
     if(WIN32)
         add_executable(windows_ui_tests tests/windows_ui_tests.cpp
-            src/platform/windows_shell.cpp src/platform/clock.cpp)
+            src/platform/windows_shell.cpp src/platform/clock.cpp
+            src/platform/taskbar_status_panel.cpp)
         pomodoro_embed_windows_resources(windows_ui_tests)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32
             ole32 uuid advapi32 user32 gdi32)

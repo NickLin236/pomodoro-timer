@@ -1,10 +1,25 @@
 # Validation record
 
-Implementation date: November 9, 2026.
+Initial implementation: November 9, 2026. Version 1.1.0 update: November 10, 2026.
 
 The development environment is Linux with GCC 9.4 and CMake 3.16.3. This environment cannot demonstrate Windows 10 desktop integration or measure the target application's runtime resource usage.
 
-Completed checks:
+Version 1.1.0 changes Close/Alt+F4 to save and exit, Minimize to hide in the notification area, and adds an optional Pomodoro status overlay on the primary horizontal Windows 10 taskbar. New regression coverage checks migration of `showTaskbarStatus` and saving/destroying the window on Close. The panel's real positioning beside Traffic Monitor, crowded-taskbar behavior, auto-hide, DPI changes, and Explorer restart still require Windows desktop validation. The overlay does not reserve space and can cover a crowded application-button area.
+
+The user reported that the previous GitHub CI run passed its MSVC build and all four Windows suites after the macro and test-manifest fixes. That reported result applies to the earlier source, not automatically to the new 1.1.0 panel implementation.
+
+Version 1.1.0 checks completed in this session:
+
+- All three portable Release CTest suites pass, including the new legacy-settings/default-on/off/type-validation cases for taskbar status.
+- The complete Windows x64 executable and native UI test executable cross-compile successfully. The new panel and synthetic-host tests also pass warning-as-error compilation.
+- Native UI coverage now includes synthetic taskbar/Traffic Monitor placement, unchanged neighboring window geometry, phase/countdown text, click forwarding, hide/show, recreation, cleanup, and real Close saving/destruction/`WM_QUIT`. These native tests are compiled here; execution is pending Windows CI.
+- CMake, embedded resource, and manifest versions agree on 1.1.0. Workflow YAML, publish Bash, and source-matched changelog-note generation have been checked. The release workflow now takes version-specific notes from the build's hashed metadata.
+- The executable still imports only Windows system DLLs and requires no companion application file.
+- Engine and controller ASan/UBSan runs passed. The persistence sanitizer binary passed direct retries but also produced intermittent recursive `DEADLYSIGNAL` output in this container; those runs were interrupted. An independent non-PIE ASan/UBSan build passed, and the current Release persistence suite passed Valgrind with zero errors and zero outstanding bytes. The intermittent sanitizer cause is not proven; it is retained as a verification limitation.
+
+No Windows 1.1.0 runtime result is claimed here.
+
+Completed checks from the initial implementation and bug audit:
 
 - Portable CMake Release build completed with GCC 9.4, `-Wall -Wextra -Wpedantic`.
 - CTest passed all 3 portable suites (12 engine scenarios, 9 persistence groups, 13 controller scenarios). Tests use explicit checks that remain active in Release builds. Engine coverage includes 25,000 deterministic randomized command steps checked against an independent elapsed-time model.
@@ -25,8 +40,8 @@ The follow-up bug audit reproduced and fixed:
 - Saving startup settings relied on a cached checkbox state and could leave an old executable registered, or fail to repair an externally removed registration. Explicit Save now reconciles the actual per-user registry value.
 - A failed scheduler registration set its error message after the last status paint. The error is now displayed immediately with the window accessible.
 
-`windows_ui_tests` drives the actual native Save Settings command with HKCU redirected to an isolated temporary key. It covers stale paths, enabling/disabling, external registry removal/replacement, quoting, background launch, and preference persistence. It creates no tray icon and does not access the real Run key. The test executable cross-compiles; execution remains pending on a Windows desktop.
+`windows_ui_tests` drives the actual native Save Settings command with HKCU redirected to an isolated temporary key. Its earlier coverage includes stale paths, enabling/disabling, external registry removal/replacement, quoting, background launch, and preference persistence. Version 1.1.0 extends it with the taskbar-status preference and saving/terminating on Close. It creates no tray icon and does not access the real Run key. The new test version still needs execution on Windows.
 
-Artifacts are under `build/windows-cross/Pomodoro.exe` and `build/windows-cross/Pomodoro-1.0.0-windows-x64.zip`. The cross-compiled binary is suitable for Windows validation; the documented MSVC Release build remains the intended release toolchain.
+Version 1.1.0 build outputs use `build/windows-cross/Pomodoro.exe` and `Pomodoro-1.1.0-windows-x64.zip`; distribution copies may also be placed in `dist/`. A cross-compiled binary is suitable for Windows validation; the documented MSVC Release build remains the intended release toolchain. The GitHub release is updated only after its matching tag workflow succeeds.
 
-The manual Windows checklist remains pending. MSVC compilation, Windows 10 shell/UI interaction, PowerShell execution, sign-in registration, physical suspend/resume, resource measurements, and a fresh offline machine were **not tested**. No measured claim about the 40 MiB target is made. A portable test or cross-compilation does not establish those acceptance criteria.
+The new version's manual Windows checklist remains pending. This Linux session has not executed the Windows 1.1.0 status panel, PowerShell installation, sign-in registration, physical suspend/resume, resource measurements, or a fresh offline machine. No measured claim about the 40 MiB target is made. A portable test or cross-compilation does not establish those acceptance criteria.

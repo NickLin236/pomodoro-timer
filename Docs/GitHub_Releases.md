@@ -12,41 +12,38 @@ https://github.com/NickLin236/pomodoro-timer/releases/latest/download/Pomodoro.e
 
 That URL works once a successful published release contains `Pomodoro.exe`. It follows GitHub's [latest-release asset URL format](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases).
 
-## Upload the source
+## Update the source
 
 Upload only the project source, resources, tests, docs, CMake files, and `.github` workflows. Generated binaries are release attachments. `.gitignore` excludes build output and workspace configuration. A source-only ZIP prepared with this project includes the hidden `.github`, `.gitignore`, and `.gitattributes` entries.
 
-If the upload has not already been completed by the assistant, extract the prepared source ZIP into a normal writable folder. Install Git and [GitHub CLI](https://cli.github.com/) on your development machine, then run these commands from the extracted folder. They target the existing empty repository supplied above:
+The repository already contains the application and release workflows. From its existing working checkout, commit and push the new version's source and documentation:
 
 ```powershell
-gh auth login --hostname github.com --git-protocol https
-gh auth setup-git
-git init
-git add .
-git commit -m "Add native Pomodoro application and release automation"
-git branch -M main
-git remote add origin https://github.com/NickLin236/pomodoro-timer.git
-git push -u origin main
+git add CMakeLists.txt README.md CHANGELOG.md Docs include src tests resources .github
+git commit -m "Release 1.1.0 with Pomodoro taskbar status and corrected close behavior"
+git push origin main
 ```
 
-If the project is already a Git checkout, retain its history and existing remote instead of running the initialization commands. These commands do not overwrite existing remote history; an existing nonempty repository must be integrated first.
+Keep the existing Git history and `origin` remote. If GitHub authentication is unavailable in the assistant's session, run the commands on your authenticated development machine. [GitHub CLI](https://cli.github.com/) can configure HTTPS Git authentication using `gh auth login` and `gh auth setup-git`.
 
-GitHub runs the CI workflow for the initial push. It builds with MSVC on Windows x64, runs the automated tests, and keeps build artifacts on the workflow run.
+GitHub runs the CI workflow for the push. It builds with MSVC on Windows x64, runs the automated tests, and keeps build artifacts on the workflow run. Verify the new commit passes before publishing its tag. A successful branch CI run alone does not create a release.
 
-## Publish version 1.0.0
+## Publish version 1.1.0
 
-After uploading the source:
+After the version 1.1.0 commit is pushed and its CI checks pass:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
-The release workflow checks that the tag matches the CMake and embedded resource versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes a direct `Pomodoro.exe` asset, the offline ZIP, and `SHA256SUMS.txt`.
+The release workflow checks that the tag matches the CMake, resource, and manifest versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes `Pomodoro.exe`, `Pomodoro-1.1.0-windows-x64.zip`, `BUILDINFO.json`, and `SHA256SUMS.txt`. `BUILDINFO.json` identifies the exact source commit used for the executable.
 
-Watch **Actions** in the repository for build/test results. After the Release workflow succeeds, open **Releases** and download `Pomodoro.exe`. The top-level README's download link then works. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
+Watch **Actions → Release** in the repository for build/test results. After the workflow succeeds, open [release v1.1.0](https://github.com/NickLin236/pomodoro-timer/releases/tag/v1.1.0) and download `Pomodoro.exe`. The top-level README's latest-download link will then point to that release. The version-specific page is available only after publication. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
 
-For later versions, update `project(Pomodoro VERSION ...)` in `CMakeLists.txt`, the file/product versions in `resources/pomodoro.rc`, and the assembly version in `resources/pomodoro.manifest`. Commit and push the changes, then push the matching new `vX.Y.Z` tag. Keep published release tags fixed.
+Version 1.1.0 changes the closing behavior and adds the Pomodoro status overlay; see [the changelog](../CHANGELOG.md) for the taskbar placement limits. Do not replace the older release's executable or move its tag to publish these changes.
+
+For later versions, update `project(Pomodoro VERSION ...)` in `CMakeLists.txt`, the file/product versions in `resources/pomodoro.rc`, and the assembly version in `resources/pomodoro.manifest`. Add a matching `## X.Y.Z` section to `CHANGELOG.md`; the release workflow uses that section as its published notes. Commit and push the changes, then push the matching new `vX.Y.Z` tag. Keep published release tags fixed.
 
 ## Upload an already-built executable manually
 

@@ -352,6 +352,10 @@ Preferences decodePreferences(const std::string& text) {
     if (!validateDuration(result.countdownDurationMs)) invalid("countdown duration out of range");
     result.soundEnabled = boolean(field(document, "soundEnabled"));
     result.startAtSignIn = boolean(field(document, "startAtSignIn"));
+    // Schema 1 files written before taskbar status support have no such field.
+    // Preserve their valid timer settings and opt into the new display default.
+    const auto showStatus = document.object.find("showTaskbarStatus");
+    if (showStatus != document.object.end()) result.showTaskbarStatus = boolean(showStatus->second);
     const auto mode = string(field(document, "backgroundMode"));
     if (mode != "trayOnly" && mode != "keepTaskbar") invalid("background mode");
     result.backgroundMode = mode == "trayOnly" ? BackgroundMode::TrayOnly : BackgroundMode::KeepTaskbar;
@@ -406,6 +410,7 @@ std::string encodePreferences(const Preferences& value) {
         ",\n  \"countdownDurationMs\":" + std::to_string(value.countdownDurationMs) +
         ",\n  \"soundEnabled\":" + (value.soundEnabled ? "true" : "false") +
         ",\n  \"startAtSignIn\":" + (value.startAtSignIn ? "true" : "false") +
+        ",\n  \"showTaskbarStatus\":" + (value.showTaskbarStatus ? "true" : "false") +
         ",\n  \"backgroundMode\":" + quote(value.backgroundMode == BackgroundMode::TrayOnly ? "trayOnly" : "keepTaskbar") +
         ",\n  \"taskbarSource\":" + quote(value.taskbarSource == TaskbarSource::Pomodoro ? "pomodoro" : "countdown") + "\n}\n";
     (void)decodePreferences(result);

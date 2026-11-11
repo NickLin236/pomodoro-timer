@@ -2,6 +2,7 @@
 // No message loop, tray registration, sign-in launch, or real user Run key is
 // used: the window stays hidden and HKCU is redirected for this process.
 #include "../src/ui/main_window.cpp"
+#include "pomodoro/taskbar_status_panel.h"
 
 #include <iostream>
 #include <optional>
@@ -100,7 +101,144 @@ private:
     MainWindow& app_;
 };
 
-void startupSettingsReconcileExternalChanges() {
+constexpr UINT syntheticPanelCallback = WM_APP + 80;
+
+struct PanelCallbacks {
+    int open = 0;
+    int contextMenu = 0;
+};
+
+LRESULT CALLBACK panelHostProcedure(HWND window, UINT message, WPARAM wParam,
+                                    LPARAM lParam, UINT_PTR, DWORD_PTR data) {
+    auto& callbacks = *reinterpret_cast<PanelCallbacks*>(data);
+    if (message == syntheticPanelCallback) {
+        if (LOWORD(lParam) == NIN_SELECT) ++callbacks.open;
+        if (LOWORD(lParam) == WM_CONTEXTMENU) ++callbacks.contextMenu;
+        return 0;
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+class SyntheticTaskbar {
+public:
+    PanelCallbacks callbacks;
+    HWND window = nullptr;
+    HWND taskList = nullptr;
+    HWND trafficMonitor = nullptr;
+
+    SyntheticTaskbar() {
+        window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            L"STATIC", L"Pomodoro synthetic taskbar", WS_POPUP,
+            20, 20, 1000, 48, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        require(window != nullptr, "Could not create synthetic taskbar host");
+        taskList = CreateWindowExW(0, L"STATIC", L"Task-list placeholder", WS_CHILD | WS_VISIBLE,
+            0, 0, 640, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        trafficMonitor = CreateWindowExW(0, L"STATIC", L"TrafficMonitorTaskbarWindow", WS_CHILD | WS_VISIBLE,
+            800, 0, 200, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!taskList || !trafficMonitor ||
+            !SetWindowSubclass(window, panelHostProcedure, 1, reinterpret_cast<DWORD_PTR>(&callbacks))) {
+            DestroyWindow(window);
+            window = nullptr;
+            throw std::runtime_error("Could not initialize synthetic taskbar children");
+        }
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+    }
+
+    ~SyntheticTaskbar() {
+        if (window && IsWindow(window)) {
+            RemoveWindowSubclass(window, panelHostProcedure, 1);
+            DestroyWindow(window);
+        }
+    }
+
+    void dispatchCallbacks() const {
+        MSG message{};
+        while (PeekMessageW(&message, window, syntheticPanelCallback, syntheticPanelCallback, PM_REMOVE))
+            DispatchMessageW(&message);
+    }
+};
+
+RECT screenBounds(HWND window) {
+    RECT bounds{};
+    require(GetWindowRect(window, &bounds) != FALSE, "Could not read synthetic window bounds");
+    return bounds;
+}
+
+void requireSameBounds(HWND window, const RECT& expected, const char* failure) {
+    const auto actual = screenBounds(window);
+    require(EqualRect(&actual, &expected) != FALSE, failure);
+}
+
+std::wstring windowCaption(HWND window) {
+    std::wstring text(static_cast<std::size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
+    const auto length = GetWindowTextW(window, text.data(), static_cast<int>(text.size()));
+    text.resize(static_cast<std::size_t>(length));
+    return text;
+}
+
+void taskbarStatusUsesOnlyItsSyntheticHost() {
+    SyntheticTaskbar host;
+    const auto hostBefore = screenBounds(host.window);
+    const auto taskListBefore = screenBounds(host.taskList);
+    const auto monitorBefore = screenBounds(host.trafficMonitor);
+    HWND panelWindow = nullptr;
+    {
+        TaskbarStatusPanel panel(GetModuleHandleW(nullptr), host.window,
+                                syntheticPanelCallback, host.window);
+        panel.update(L"Focus 24:59", L"Cycle 1 / 4", true);
+        panelWindow = panel.handle();
+        require(panel.available() && IsWindow(panelWindow), "Status panel did not attach to the synthetic taskbar");
+        require(GetParent(panelWindow) == host.window, "Status panel attached outside its supplied taskbar host");
+        require(IsWindowVisible(panelWindow) != FALSE, "Active status panel was not visible");
+        const auto panelBounds = screenBounds(panelWindow);
+        require(panelBounds.right <= monitorBefore.left && panelBounds.left >= hostBefore.left,
+                "Status panel was not placed to the left of Traffic Monitor");
+        require(panelBounds.top >= hostBefore.top && panelBounds.bottom <= hostBefore.bottom,
+                "Status panel extends outside the taskbar vertically");
+        requireSameBounds(host.window, hostBefore, "Status panel resized or moved the taskbar host");
+        requireSameBounds(host.taskList, taskListBefore, "Status panel resized or moved the task list");
+        requireSameBounds(host.trafficMonitor, monitorBefore, "Status panel resized or moved Traffic Monitor");
+        auto caption = windowCaption(panelWindow);
+        require(caption.find(L"Focus 24:59") != std::wstring::npos && caption.find(L"Cycle 1 / 4") != std::wstring::npos,
+                "Status panel did not expose its current phase/countdown text");
+
+        SendMessageW(panelWindow, WM_LBUTTONUP, 0, MAKELPARAM(5, 5));
+        SendMessageW(panelWindow, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(panelWindow),
+                     MAKELPARAM(panelBounds.left + 5, panelBounds.top + 5));
+        host.dispatchCallbacks();
+        require(host.callbacks.open == 1, "Status panel did not forward a click to open the app");
+        require(host.callbacks.contextMenu == 1, "Status panel did not forward its context menu request");
+
+        panel.update(L"Break 04:59", L"Paused - cycle 1 / 4", true);
+        caption = windowCaption(panel.handle());
+        require(caption.find(L"Break 04:59") != std::wstring::npos && caption.find(L"Paused") != std::wstring::npos,
+                "Status panel did not update the break/paused display");
+        panel.update(L"", L"", false);
+        require(!IsWindowVisible(panel.handle()), "Disabled or idle status panel remained visible");
+        panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
+        require(IsWindowVisible(panel.handle()) != FALSE, "Status panel did not show after being re-enabled");
+        panel.hide();
+        require(!IsWindowVisible(panel.handle()), "Explicit status-panel hide failed");
+        panel.explorerRestarted();
+        panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
+        panelWindow = panel.handle();
+        require(panel.available() && IsWindowVisible(panelWindow), "Status panel did not rebuild after host refresh");
+        require(screenBounds(panelWindow).right <= monitorBefore.left,
+                "Rebuilt status panel lost its Traffic Monitor anchor");
+        caption = windowCaption(panelWindow);
+        require(caption.find(L"Focus 24:58") != std::wstring::npos && caption.find(L"Cycle 2 / 4") != std::wstring::npos,
+                "Rebuilt status panel lost unchanged phase/countdown text");
+    }
+    require(!IsWindow(panelWindow), "Destroying the status panel leaked its native window");
+    requireSameBounds(host.window, hostBefore, "Status-panel cleanup changed the taskbar host");
+    requireSameBounds(host.taskList, taskListBefore, "Status-panel cleanup changed the task list");
+    requireSameBounds(host.trafficMonitor, monitorBefore, "Status-panel cleanup changed Traffic Monitor");
+    MSG quit{};
+    require(!PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_NOREMOVE),
+            "Status-panel cleanup unexpectedly stopped the application message loop");
+}
+
+void settingsAndCloseBehavior() {
     RegistrySandbox registry;
     TemporaryData files;
     StateStore store(files.path);
@@ -110,7 +248,9 @@ void startupSettingsReconcileExternalChanges() {
     const auto window = app.handle();
     const auto checkbox = GetDlgItem(window, StartupCheck);
     require(checkbox != nullptr, "Startup checkbox is missing");
-    ComboBox_SetCurSel(GetDlgItem(window, BackgroundCombo), 0);
+    const auto statusCheckbox = GetDlgItem(window, StatusCheck);
+    require(statusCheckbox != nullptr, "Taskbar status checkbox is missing");
+    Button_SetCheck(statusCheckbox, BST_UNCHECKED);
     ComboBox_SetCurSel(GetDlgItem(window, TaskbarCombo), 0);
 
     const auto saveSettings = [window]() {
@@ -126,8 +266,10 @@ void startupSettingsReconcileExternalChanges() {
     saveSettings();
     require(!readStartup(), "Saving startup Off did not remove an old executable path");
     require(store.loadPreferences().warning.empty(), "UI preferences did not persist");
+    require(!store.loadPreferences().value.showTaskbarStatus, "Taskbar status Off preference did not persist");
 
     Button_SetCheck(checkbox, BST_CHECKED);
+    Button_SetCheck(statusCheckbox, BST_CHECKED);
     saveSettings();
     require(isStartAtSignInEnabled(), "Startup On did not register the current executable");
     const auto expected = readStartup();
@@ -143,12 +285,35 @@ void startupSettingsReconcileExternalChanges() {
     saveSettings();
     require(readStartup() == expected, "Saving unchanged startup On did not repair an old executable path");
     require(store.loadPreferences().value.startAtSignIn, "Startup On preference did not persist");
+    require(store.loadPreferences().value.showTaskbarStatus, "Taskbar status On preference did not persist");
 
     Button_SetCheck(checkbox, BST_UNCHECKED);
     saveSettings();
     require(!readStartup(), "Startup Off did not remove this application's value");
     require(!store.loadPreferences().value.startAtSignIn, "Startup Off preference did not persist");
     require(!IsWindowVisible(window), "Settings test unexpectedly showed the hidden window");
+
+    // Close must terminate the window, including an active session, rather
+    // than hiding it in the tray. Its saved UTC deadline remains recoverable.
+    SetDlgItemTextW(window, HoursInput, L"0");
+    SetDlgItemTextW(window, MinutesInput, L"1");
+    SetDlgItemTextW(window, SecondsInput, L"0");
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(CountdownAction, BN_CLICKED),
+                 reinterpret_cast<LPARAM>(GetDlgItem(window, CountdownAction)));
+    require(store.loadState().value.countdown.status == Status::Running,
+            "Countdown did not start before close regression");
+    clock.advance(2'000);
+    SendMessageW(window, WM_CLOSE, 0, 0);
+    require(!IsWindow(window), "Close hid the main window instead of destroying it");
+    MSG quit{};
+    require(PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE) != FALSE,
+            "Close did not request termination of the application message loop");
+    require(quit.wParam == 0, "Close requested an unexpected process exit status");
+    const auto closed = store.loadState();
+    require(closed.warning.empty(), "Close did not save a valid timer state");
+    require(closed.value.countdown.status == Status::Running, "Close changed the captured countdown state");
+    require(closed.value.countdown.deadlineUtcMs - clock.sample.utcMs == 58'000,
+            "Close did not preserve the running countdown deadline");
 }
 } // namespace
 
@@ -158,8 +323,9 @@ int main() {
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
         require(InitCommonControlsEx(&controls) != FALSE, "Could not initialize native controls");
-        startupSettingsReconcileExternalChanges();
-        std::cout << "Windows UI startup-registry regression tests passed\n";
+        taskbarStatusUsesOnlyItsSyntheticHost();
+        settingsAndCloseBehavior();
+        std::cout << "Windows UI taskbar, settings, startup, and close regression tests passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Windows UI regression test failed: " << error.what() << '\n';

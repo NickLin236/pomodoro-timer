@@ -15,6 +15,8 @@ struct Preferences {
     Millis countdownDurationMs = 5 * 60 * 1000;
     bool soundEnabled = true;
     bool startAtSignIn = false;
+    bool showTaskbarStatus = true;
+    // Retained for settings-file compatibility; minimize now always uses tray.
     BackgroundMode backgroundMode = BackgroundMode::TrayOnly;
     TaskbarSource taskbarSource = TaskbarSource::Pomodoro;
 };

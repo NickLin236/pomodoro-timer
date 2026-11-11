@@ -58,6 +58,12 @@ jobs:
           assert info['commit'] == os.environ['SOURCE_COMMIT'], 'Artifact source commit mismatch'
           assert info['version'] == os.environ['APP_VERSION'], 'Artifact version mismatch'
           assert info['tag'] == os.environ['RELEASE_TAG'], 'Artifact tag mismatch'
+          notes = info['releaseNotes'].strip()
+          assert notes, 'Release notes are missing from tested build metadata'
+          with open('release-notes.md', 'w', encoding='utf-8', newline='\n') as target:
+              target.write('Download **Pomodoro.exe** below and run it on Windows 10 x64. No repository clone or extra application files are required.\n\n')
+              target.write(notes + '\n\n')
+              target.write('Built with MSVC in Release mode and tested before publication. See BUILDINFO.json for the source commit and automated suites.\n')
           PY
 
           if gh release view "$RELEASE_TAG" --repo "$RELEASE_REPO" --json isDraft,assets > existing-release.json 2>/dev/null; then
@@ -81,17 +87,10 @@ jobs:
               exit 0
             fi
           else
-            cat > release-notes.md <<'NOTES'
-          Download **Pomodoro.exe** below and run it on Windows 10 x64. No repository clone, compiler, or additional application files are required.
-
-          The ZIP is optional and includes per-user install/uninstall scripts and documentation. SHA256SUMS.txt contains file checksums; BUILDINFO.json identifies the exact source commit and automated test suites.
-
-          Built with MSVC in Release mode and tested before publication. Windows 10 shell, DPI, suspend/resume, and memory acceptance checks still require the documented manual checklist.
-          NOTES
             gh release create "$RELEASE_TAG" --repo "$RELEASE_REPO" --verify-tag --draft \
               --title "Pomodoro $RELEASE_TAG" --notes-file release-notes.md
           fi
 
           gh release upload "$RELEASE_TAG" --repo "$RELEASE_REPO" --clobber \
             Pomodoro.exe "$archive" BUILDINFO.json SHA256SUMS.txt
-          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --draft=false --latest
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_REPO" --notes-file release-notes.md --draft=false --latest

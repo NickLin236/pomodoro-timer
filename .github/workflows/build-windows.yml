@@ -94,12 +94,18 @@ jobs:
           Copy-Item build/windows-msvc/Release/Pomodoro.exe release/Pomodoro.exe
           $archiveName = "Pomodoro-$env:APP_VERSION-windows-x64.zip"
           Copy-Item (Join-Path build/release $archiveName) (Join-Path release $archiveName)
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $section = [regex]::Match($changelog, '(?ms)^##[ \t]+' + [regex]::Escape($env:APP_VERSION) + '(?:[ \t]+[^\r\n]*)?\r?\n(.*?)(?=^##[ \t]|\z)')
+          if (-not $section.Success -or -not $section.Groups[1].Value.Trim()) {
+            throw "CHANGELOG.md must describe version $env:APP_VERSION."
+          }
           $metadata = @{
             version = $env:APP_VERSION
             commit = $env:SOURCE_COMMIT
             tag = $env:RELEASE_TAG
             toolchain = 'MSVC x64 Release, static CRT'
             tested = @('timer_engine', 'state_store', 'controller', 'windows_ui')
+            releaseNotes = $section.Groups[1].Value.Trim()
           } | ConvertTo-Json
           $utf8 = [Text.UTF8Encoding]::new($false)
           [IO.File]::WriteAllText((Join-Path $PWD release/BUILDINFO.json), $metadata + "`n", $utf8)

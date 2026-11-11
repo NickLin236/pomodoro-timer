@@ -25,11 +25,20 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 
 ## Shell, clocks, accessibility
 
-- [ ] Close/minimize in both background modes, restore, and actual Exit.
+- [ ] Close using X and Alt+F4: state saves, the process exits, and its notification icon/status panel disappear.
+- [ ] Minimize: main window and taskbar button hide, notification icon remains, timers continue; restore from the icon.
+- [ ] With tray creation unavailable, minimizing retains an accessible normal taskbar button.
 - [ ] Tray Open, settings, independent pause/resume and reset commands, Exit; keyboard context menu.
 - [ ] Second launch opens existing window without competing timers.
-- [ ] Restart Explorer; tray icon, menu, and taskbar progress return.
-- [ ] Taskbar source switching, paused state, hidden/visible taskbar labels.
+- [ ] Restart Explorer during focus/break; notification icon, menu, and taskbar status return without duplicate panels.
+- [ ] Start a Pomodoro: phase, remaining time, and cycle appear as text in the taskbar area.
+- [ ] Pause/resume, focus/break transition, reset, and final break completion update/hide the text panel correctly.
+- [ ] Turn Show Pomodoro status in taskbar off/on, save, relaunch; preference is retained. Existing 1.0 settings default it on.
+- [ ] Traffic Monitor running, stopped, moved/resized, or restarted: the Pomodoro panel remains beside it and does not cover its readings.
+- [ ] Test with a crowded taskbar: confirm the documented overlay limitation, leave sufficient space or disable the panel, and ensure Traffic Monitor readings remain uncovered.
+- [ ] Taskbar auto-hide, resizing, screen resolution change, and 100/125/150/200% DPI: status follows the supported taskbar location.
+- [ ] Vertical/unsupported taskbars fail gracefully with the documented fallback; no invisible window traps access to the app.
+- [ ] Main-window indicator source switching, paused state, and hidden/visible taskbar labels.
 - [ ] Every automatic focus/break/countdown completion and notification test with sound on/off.
 - [ ] Windows notifications disabled: in-app completion status remains available.
 - [ ] Sign-in startup on/off without elevation; launching background mode works after sign-in.

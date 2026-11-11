@@ -1,5 +1,6 @@
 #include "pomodoro/controller.h"
 #include "pomodoro/windows_shell.h"
+#include "pomodoro/taskbar_status_panel.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
@@ -27,7 +28,7 @@ enum Command : int {
     SecondsInput, CountdownAction, CountdownReset, SaveCountdown,
     SoundCheck, StartupCheck, BackgroundCombo, TaskbarCombo, SaveSettings,
     TestNotification, OpenWindow, OpenSettings, ExitApplication,
-    TogglePomodoro, ToggleCountdown
+    TogglePomodoro, ToggleCountdown, StatusCheck
 };
 
 std::wstring wide(const std::string& text) {
@@ -81,6 +82,7 @@ public:
     MainWindow(HINSTANCE instance, StateStore& store, Clock& clock)
         : instance_(instance), controller_(store, clock) {}
     ~MainWindow() {
+        taskbarPanel_.reset();
         shell_.reset();
         if (font_) DeleteObject(font_);
         if (largeFont_) DeleteObject(largeFont_);
@@ -110,6 +112,7 @@ public:
         Button_SetCheck(startup_, startupActual_ ? BST_CHECKED : BST_UNCHECKED);
         if (!shell_->installTray()) notice_ = L"Windows could not create the tray icon. The window will stay accessible on the taskbar.";
         shell_->initializeTaskbar();
+        taskbarPanel_ = std::make_unique<TaskbarStatusPanel>(instance_, window_, trayMessage);
         showUpdate(recovered);
         if (background && controller_.warning().empty()) backgroundWindow();
         else open();
@@ -183,20 +186,18 @@ private:
         startup_ = add(L"BUTTON", L"Start when I sign in (launch in background)", WS_TABSTOP | BS_AUTOCHECKBOX,
                        StartupCheck, 2, 28, 118, 590, 30);
         label(L"Install in a stable folder before enabling sign-in startup.", 2, 48, 153, 550, 40);
-        label(L"When I close the window", 2, 28, 208, 570);
-        background_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | CBS_DROPDOWNLIST,
-                          BackgroundCombo, 2, 28, 238, 530, 130);
-        ComboBox_AddString(background_, L"Hide to tray (default)");
-        ComboBox_AddString(background_, L"Minimize and keep taskbar status");
-        label(L"Taskbar source when both timers are active", 2, 28, 288, 570);
+        statusCheck_ = add(L"BUTTON", L"Show Pomodoro status in taskbar", WS_TABSTOP | BS_AUTOCHECKBOX,
+                           StatusCheck, 2, 28, 208, 590, 30);
+        label(L"Shows the active Pomodoro phase and remaining time.", 2, 48, 243, 550, 40);
+        label(L"Main window indicator when both timers are active", 2, 28, 288, 570);
         source_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | CBS_DROPDOWNLIST,
                       TaskbarCombo, 2, 28, 318, 530, 130);
         ComboBox_AddString(source_, L"Pomodoro"); ComboBox_AddString(source_, L"General timer");
         button(L"Save settings", SaveSettings, 2, 28, 385, 140);
         button(L"Test notification", TestNotification, 2, 190, 385, 180);
-        label(L"Closing keeps timers running. Use Exit to save and quit.\r\nNotifications depend on your Windows notification settings.",
+        label(L"Minimize hides the app in the notification area. Close exits.\r\nNotifications depend on your Windows notification settings.",
               2, 28, 436, 590, 58);
-        status_ = label(L"Ready. Close sends the app to the background; Exit quits.", -1, 28, 514, 590, 65);
+        status_ = label(L"Ready. Minimize hides the app; Close and Exit save and quit.", -1, 28, 514, 590, 65);
         button(L"Exit", ExitApplication, -1, 524, 590, 100);
         using GetDpiForWindowFunction = UINT (WINAPI*)(HWND);
         const auto getDpi = user32Function<GetDpiForWindowFunction>("GetDpiForWindow");
@@ -359,11 +360,11 @@ private:
         else if (message == WM_SETFOCUS)
             PostMessageW(self->window_, revealFocusMessage, reinterpret_cast<WPARAM>(control), 0);
         else if (message == WM_MOUSEWHEEL) {
-            if ((control == self->background_ || control == self->source_) && ComboBox_GetDroppedState(control))
+            if (control == self->source_ && ComboBox_GetDroppedState(control))
                 return DefSubclassProc(control, message, wParam, lParam);
             return SendMessageW(self->window_, message, wParam, lParam);
         } else if (message == WM_KEYDOWN && (wParam == VK_PRIOR || wParam == VK_NEXT)) {
-            if ((control == self->background_ || control == self->source_) && ComboBox_GetDroppedState(control))
+            if (control == self->source_ && ComboBox_GetDroppedState(control))
                 return DefSubclassProc(control, message, wParam, lParam);
             self->scroll(true, wParam == VK_PRIOR ? SB_PAGEUP : SB_PAGEDOWN);
             return 0;
@@ -379,7 +380,7 @@ private:
         Millis seconds = preferences.countdownDurationMs / 1000;
         setNumber(hours_, seconds / 3600); setNumber(minutes_, seconds / 60 % 60); setNumber(seconds_, seconds % 60);
         Button_SetCheck(sound_, preferences.soundEnabled ? BST_CHECKED : BST_UNCHECKED);
-        ComboBox_SetCurSel(background_, preferences.backgroundMode == BackgroundMode::TrayOnly ? 0 : 1);
+        Button_SetCheck(statusCheck_, preferences.showTaskbarStatus ? BST_CHECKED : BST_UNCHECKED);
         ComboBox_SetCurSel(source_, preferences.taskbarSource == TaskbarSource::Pomodoro ? 0 : 1);
     }
     void setNumber(HWND control, Millis value) { SetWindowTextW(control, std::to_wstring(value).c_str()); }
@@ -471,6 +472,15 @@ private:
             duration(remaining) + (usePomodoro ? L" — " + std::to_wstring(p.cycle) + L"/" + std::to_wstring(p.config.cycles) : L"") + L" — Pomodoro";
         SetWindowTextW(window_, title.c_str());
         shell_->updateTooltip(currentSummary());
+        std::wstring panelWarning;
+        if (taskbarPanel_) {
+            const bool showPanel = controller_.preferences().showTaskbarStatus && active(p.status);
+            const std::wstring panelPhase = p.phase == Phase::Focus ? L"Focus " : L"Break ";
+            const std::wstring panelCycle = (p.status == Status::Paused ? L"Paused · " : L"Cycle ") +
+                std::to_wstring(p.cycle) + L" / " + std::to_wstring(p.config.cycles);
+            taskbarPanel_->update(panelPhase + duration(engine.pomodoroRemaining(controller_.now())), panelCycle, showPanel);
+            if (showPanel && !taskbarPanel_->available()) panelWarning = taskbarPanel_->lastError();
+        }
         if (controller_.running() && !schedulerRunning_) {
             if (SetTimer(window_, schedulerId, 1000, nullptr)) schedulerRunning_ = true;
             else {
@@ -480,7 +490,8 @@ private:
         } else if (!controller_.running() && schedulerRunning_) {
             KillTimer(window_, schedulerId); schedulerRunning_ = false;
         }
-        const std::wstring message = controller_.warning().empty() ? notice_ : L"Storage/recovery: " + wide(controller_.warning());
+        const std::wstring message = !controller_.warning().empty() ? L"Storage/recovery: " + wide(controller_.warning()) :
+            !panelWarning.empty() ? L"Taskbar status: " + panelWarning : notice_;
         SetWindowTextW(status_, message.c_str());
         if (!controller_.warning().empty() && controller_.warning() != lastStorageWarning_) {
             lastStorageWarning_ = controller_.warning();
@@ -493,7 +504,7 @@ private:
         SetForegroundWindow(window_);
     }
     void backgroundWindow() {
-        if (controller_.preferences().backgroundMode == BackgroundMode::TrayOnly && shell_->trayInstalled()) ShowWindow(window_, SW_HIDE);
+        if (shell_->trayInstalled()) ShowWindow(window_, SW_HIDE);
         else ShowWindow(window_, SW_MINIMIZE);
     }
 
@@ -573,7 +584,7 @@ private:
             auto prefs = controller_.preferences();
             prefs.soundEnabled = Button_GetCheck(sound_) == BST_CHECKED;
             prefs.startAtSignIn = Button_GetCheck(startup_) == BST_CHECKED;
-            prefs.backgroundMode = ComboBox_GetCurSel(background_) == 0 ? BackgroundMode::TrayOnly : BackgroundMode::KeepTaskbar;
+            prefs.showTaskbarStatus = Button_GetCheck(statusCheck_) == BST_CHECKED;
             prefs.taskbarSource = ComboBox_GetCurSel(source_) == 0 ? TaskbarSource::Pomodoro : TaskbarSource::Countdown;
             std::wstring startupError;
             // Reconcile the registry on every explicit save: the executable may
@@ -620,6 +631,7 @@ private:
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         if (taskbarCreated_ != 0 && message == taskbarCreated_ && shell_) {
             if (!shell_->restoreTray()) { notice_ = L"Could not restore the tray icon after Explorer restarted."; open(); }
+            if (taskbarPanel_) taskbarPanel_->explorerRestarted();
             shell_->initializeTaskbar(); refresh(); return 0;
         }
         if (taskbarButtonCreated_ != 0 && message == taskbarButtonCreated_ && shell_) { shell_->initializeTaskbar(); refresh(); return 0; }
@@ -645,7 +657,7 @@ private:
                 open(); showUpdate(controller_.poll()); refresh();
             } else if (LOWORD(lParam) == WM_CONTEXTMENU) trayMenu(); return 0;
         case WM_SIZE:
-            if (wParam == SIZE_MINIMIZED && shell_ && controller_.preferences().backgroundMode == BackgroundMode::TrayOnly && shell_->trayInstalled())
+            if (wParam == SIZE_MINIMIZED && shell_ && shell_->trayInstalled())
                 ShowWindow(window_, SW_HIDE);
             if (wParam != SIZE_MINIMIZED) updateScrollBars();
             return 0;
@@ -695,18 +707,19 @@ private:
             if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) { showUpdate(controller_.poll(true)); refresh(); }
             return TRUE;
         case WM_TIMECHANGE: showUpdate(controller_.poll()); refresh(); return 0;
+        case WM_DISPLAYCHANGE:
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            if (taskbarPanel_) { showUpdate(controller_.poll()); refresh(); }
+            return 0;
         case WM_QUERYENDSESSION: showUpdate(controller_.poll()); controller_.save(); return TRUE;
         case WM_ENDSESSION: if (wParam) { controller_.save(); DestroyWindow(window_); } return 0;
         case WM_CLOSE:
-            showUpdate(controller_.poll());
-            if (!controller_.save()) {
-                open();
-                error(L"Timer state could not be saved. The window will stay open.\r\n" + wide(controller_.warning()));
-            } else backgroundWindow();
-            refresh();
+            command(ExitApplication);
             return 0;
         case WM_DESTROY:
             if (schedulerRunning_) KillTimer(window_, schedulerId);
+            taskbarPanel_.reset();
             shell_.reset(); PostQuitMessage(0); return 0;
         default: return DefWindowProcW(window_, message, wParam, lParam);
         }
@@ -716,16 +729,17 @@ private:
     HWND window_ = nullptr;
     Controller controller_;
     std::unique_ptr<ShellIntegration> shell_;
+    std::unique_ptr<TaskbarStatusPanel> taskbarPanel_;
     std::vector<Placement> placements_;
     HFONT font_ = nullptr, largeFont_ = nullptr;
     UINT dpi_ = 96, taskbarCreated_ = 0, taskbarButtonCreated_ = 0;
     int page_ = 0, scrollX_ = 0, scrollY_ = 0, wheelDelta_ = 0;
     bool schedulerRunning_ = false, startupActual_ = false, updatingScroll_ = false;
-    std::wstring notice_ = L"Ready. Close sends the app to the background; Exit quits.";
+    std::wstring notice_ = L"Ready. Minimize hides the app; Close and Exit save and quit.";
     std::string lastStorageWarning_;
     HWND tabs_{}, focus_{}, break_{}, cycles_{}, pomodoroTime_{}, pomodoroPhase_{}, pomodoroCaptured_{}, pomodoroAction_{}, skip_{};
     HWND hours_{}, minutes_{}, seconds_{}, countdownTime_{}, countdownStatus_{}, countdownAction_{};
-    HWND sound_{}, startup_{}, background_{}, source_{}, status_{};
+    HWND sound_{}, startup_{}, statusCheck_{}, source_{}, status_{};
 };
 
 struct HandleCloser { void operator()(void* handle) const { if (handle) CloseHandle(handle); } };
