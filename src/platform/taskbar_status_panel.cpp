@@ -45,13 +45,35 @@ bool intersects(const RECT& first, const RECT& second) {
     return IntersectRect(&intersection, &first, &second) != FALSE;
 }
 
-BOOL CALLBACK findTrafficMonitor(HWND window, LPARAM result) {
-    if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE)) return TRUE;
+struct AnchorSearch {
+    HWND host;
+    RECT clientBounds;
+    HWND trafficMonitor = nullptr;
+    HWND notificationArea = nullptr;
+};
+
+BOOL CALLBACK findTaskbarAnchor(HWND window, LPARAM result) {
+    auto& search = *reinterpret_cast<AnchorSearch*>(result);
+    // Explorer can retain hidden children while rebuilding its taskbar. Ignore
+    // those without rejecting a temporarily hidden/auto-hidden host itself.
+    for (HWND current = window; current && current != search.host; current = GetParent(current)) {
+        if (!(GetWindowLongPtrW(current, GWL_STYLE) & WS_VISIBLE)) return TRUE;
+    }
+    RECT bounds{};
+    if (!GetWindowRect(window, &bounds)) return TRUE;
+    MapWindowPoints(HWND_DESKTOP, search.host, reinterpret_cast<POINT*>(&bounds), 2);
+    if (bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
+        !intersects(search.clientBounds, bounds)) return TRUE;
     wchar_t title[128]{};
     GetWindowTextW(window, title, static_cast<int>(std::size(title)));
-    if (std::wstring(title) != trafficMonitorTitle) return TRUE;
-    *reinterpret_cast<HWND*>(result) = window;
-    return FALSE;
+    if (std::wstring(title) == trafficMonitorTitle) {
+        search.trafficMonitor = window;
+        return FALSE;
+    }
+    wchar_t className[128]{};
+    GetClassNameW(window, className, static_cast<int>(std::size(className)));
+    if (std::wstring(className) == L"TrayNotifyWnd") search.notificationArea = window;
+    return TRUE;
 }
 } // namespace
 
@@ -83,7 +105,7 @@ bool TaskbarStatusPanel::create(HWND host) {
     DpiScope dpiContext(host);
     const std::wstring caption = firstLine_ + L"\n" + secondLine_;
     window_ = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_NOPARENTNOTIFY,
-        panelClass, caption.c_str(), WS_CHILD, 0, 0, 1, 1, host,
+        panelClass, caption.c_str(), WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, host,
         nullptr, instance_, this);
     if (!window_) {
         fail(L"Windows could not attach the status panel to the taskbar.");
@@ -95,31 +117,30 @@ bool TaskbarStatusPanel::create(HWND host) {
 
 bool TaskbarStatusPanel::locate(HWND& host, RECT& hostBounds, RECT& anchorBounds) {
     host = explicitHost_ ? explicitHost_ : FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!host || !IsWindow(host) || !GetWindowRect(host, &hostBounds)) {
+    if (!host || !IsWindow(host)) {
         fail(L"The Windows taskbar is unavailable; status will return when Explorer is ready.");
         return false;
     }
-    if (hostBounds.right - hostBounds.left <= hostBounds.bottom - hostBounds.top) {
-        fail(L"The status panel requires a horizontal Windows 10 taskbar.");
+    DpiScope dpiContext(host);
+    if (!GetClientRect(host, &hostBounds)) {
+        fail(L"Windows could not read the taskbar's available display area.");
         return false;
     }
-    if (!explicitHost_) {
-        HWND container = FindWindowExW(host, nullptr, L"ReBarWindow32", nullptr);
-        if (!container) container = FindWindowExW(host, nullptr, L"WorkerW", nullptr);
-        HWND taskList = container ? FindWindowExW(container, nullptr, L"MSTaskSwWClass", nullptr) : nullptr;
-        if (!taskList && container) taskList = FindWindowExW(container, nullptr, L"MSTaskListWClass", nullptr);
-        if (!taskList) {
-            fail(L"This status panel supports the classic Windows 10 taskbar. The current taskbar layout is unsupported.");
-            return false;
-        }
+    if (hostBounds.right - hostBounds.left <= hostBounds.bottom - hostBounds.top) {
+        fail(L"The status panel requires a horizontal Windows taskbar.");
+        return false;
     }
-    HWND anchor = nullptr;
-    EnumChildWindows(host, findTrafficMonitor, reinterpret_cast<LPARAM>(&anchor));
-    if (!anchor) anchor = FindWindowExW(host, nullptr, L"TrayNotifyWnd", nullptr);
-    if (!anchor || !GetWindowRect(anchor, &anchorBounds) || !intersects(hostBounds, anchorBounds)) {
+    // The task-list class and nesting differ between Explorer releases and
+    // taskbar replacements. Placement needs only a visible anchor, so do not
+    // reject a working Traffic Monitor based on unrelated task-list classes.
+    AnchorSearch search{host, hostBounds};
+    EnumChildWindows(host, findTaskbarAnchor, reinterpret_cast<LPARAM>(&search));
+    const HWND anchor = search.trafficMonitor ? search.trafficMonitor : search.notificationArea;
+    if (!anchor || !GetWindowRect(anchor, &anchorBounds)) {
         fail(L"Could not find Traffic Monitor or the taskbar notification area for the status panel.");
         return false;
     }
+    MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&anchorBounds), 2);
     return true;
 }
 
@@ -194,6 +215,7 @@ void TaskbarStatusPanel::reposition() {
     HWND host = nullptr;
     RECT taskbar{}, anchor{};
     if (!locate(host, taskbar, anchor)) return;
+    DpiScope dpiContext(host);
     if (window_ && (!IsWindow(window_) || host_ != host)) {
         if (IsWindow(window_)) DestroyWindow(window_);
         window_ = nullptr;
@@ -220,22 +242,21 @@ void TaskbarStatusPanel::reposition() {
         ReleaseDC(window_, dc);
     }
     const int width = std::clamp(textWidth + 2 * gap, MulDiv(118, static_cast<int>(dpi), 96), MulDiv(180, static_cast<int>(dpi), 96));
-    RECT bounds{anchor.left - taskbar.left - gap - width, inset,
-                anchor.left - taskbar.left - gap, inset + height};
+    RECT bounds{anchor.left - gap - width, inset,
+                anchor.left - gap, inset + height};
     if (bounds.left < MulDiv(48, static_cast<int>(dpi), 96) || bounds.right > taskbar.right - taskbar.left) {
         fail(L"There is not enough taskbar space to the left of Traffic Monitor for Pomodoro status.");
         return;
     }
     updateColors(host, bounds);
     if (!SetWindowPos(window_, HWND_TOP, bounds.left, bounds.top, width, height,
-                      SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
+                      SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)) {
         fail(L"Windows could not position the Pomodoro taskbar status panel.");
         return;
     }
     // Keep the child's requested visibility intact. The taskbar parent handles
     // hide/show, offscreen auto-hide movement, and fullscreen z-order; manually
     // hiding here could leave a paused panel hidden after the parent returns.
-    ShowWindow(window_, SW_SHOWNOACTIVATE);
     layoutAvailable_ = true;
     error_.clear();
 }

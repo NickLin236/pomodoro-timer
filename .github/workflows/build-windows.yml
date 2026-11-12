@@ -78,7 +78,7 @@ jobs:
       - name: Build Release application and tests
         run: cmake --build --preset windows-release --parallel
 
-      - name: Run all four Windows test suites
+      - name: Run all Windows test suites
         run: ctest --preset windows-release
 
       - name: Collect standalone executable, ZIP, provenance, and checksums
@@ -104,7 +104,7 @@ jobs:
             commit = $env:SOURCE_COMMIT
             tag = $env:RELEASE_TAG
             toolchain = 'MSVC x64 Release, static CRT'
-            tested = @('timer_engine', 'state_store', 'controller', 'windows_ui')
+            tested = @('timer_engine', 'state_store', 'controller', 'notifications', 'windows_ui')
             releaseNotes = $section.Groups[1].Value.Trim()
           } | ConvertTo-Json
           $utf8 = [Text.UTF8Encoding]::new($false)

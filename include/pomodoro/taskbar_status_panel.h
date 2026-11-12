@@ -10,7 +10,8 @@
 
 namespace pomodoro {
 
-// A small text window drawn over existing space in the classic Windows taskbar.
+// A small text window drawn over existing space in a horizontal Windows taskbar
+// with a discoverable Traffic Monitor or notification-area anchor.
 // It never resizes Explorer or Traffic Monitor and does not reserve a taskbar
 // band. Leave a gap beside Traffic Monitor when the taskbar has many buttons.
 class TaskbarStatusPanel final {

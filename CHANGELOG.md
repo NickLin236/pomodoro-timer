@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0 — November 11, 2026
+
+- Show either active Pomodoro or countdown status in the taskbar, using the preferred source when both timers are active and automatically falling back to the active timer.
+- Find Traffic Monitor and the notification area through descendant windows instead of requiring one exact Explorer taskbar hierarchy. Horizontal taskbar layouts with a usable anchor can display the panel; Windows 11 placement remains unverified.
+- Replace notification-area balloons with native Windows notifications containing timer-specific text, a **Dismiss** button, and a **Stop** button. Dismiss removes the notification; Stop resets only the session that created it, so an old notification cannot stop a newer session.
+- Register notification identity and protocol activation per user, including a notification shortcut, when needed. The executable remains standalone and requires no administrator access or additional download.
+- Report notification setup, policy, and delivery errors with details instead of a generic rejection message, and retry failed delivery without accumulating old notifications.
+- Capture asynchronous Windows delivery failures, with bounded callback ownership and cleanup on reset, replacement, and exit.
+- Add regression coverage for resetting during the final break, completing a countdown, starting another Pomodoro, reopening, and resetting at a phase boundary. These tests preserve every expected focus/break completion and full break duration; they do not establish the cause of the reported skipped break on the user's desktop.
+- Add tests for notification content, actions, session isolation, and more varied taskbar nesting.
+
+The taskbar panel remains an overlay on a primary horizontal taskbar and can cover application buttons when space is crowded. Vertical layouts remain unsupported. Real Windows notification delivery, Dismiss/Stop behavior, DPI/auto-hide, and Traffic Monitor coexistence require the Windows desktop checklist; portable tests and cross-compilation cannot validate those behaviors.
+
 ## 1.1.0 — November 10, 2026
 
 - Close and Alt+F4 now save and exit the application, matching Exit.

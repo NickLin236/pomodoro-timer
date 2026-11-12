@@ -1,6 +1,8 @@
 #include "pomodoro/controller.h"
 #include "pomodoro/windows_shell.h"
 #include "pomodoro/taskbar_status_panel.h"
+#include "pomodoro/notifications.h"
+#include "pomodoro/windows_notifications.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
@@ -18,6 +20,8 @@ constexpr wchar_t windowClass[] = L"PomodoroNative.MainWindow.v1";
 constexpr UINT trayMessage = WM_APP + 1;
 constexpr UINT activateMessage = WM_APP + 2;
 constexpr UINT revealFocusMessage = WM_APP + 3;
+constexpr UINT notificationFailureMessage = WM_APP + 4;
+constexpr ULONG_PTR notificationCopyData = 0x504F4D4E;
 constexpr UINT_PTR schedulerId = 1;
 constexpr DWORD mainWindowStyle = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN;
 constexpr int contentWidth = 672;
@@ -105,17 +109,30 @@ public:
         return window_ != nullptr;
     }
 
-    void begin(bool background) {
-        const auto recovered = controller_.load();
+    void begin(bool background, const std::optional<NotificationAction>& activation = std::nullopt) {
+        runtimeIntegration_ = true;
+        auto recovered = controller_.load();
         loadInputs();
         startupActual_ = isStartAtSignInEnabled();
         Button_SetCheck(startup_, startupActual_ ? BST_CHECKED : BST_UNCHECKED);
         if (!shell_->installTray()) notice_ = L"Windows could not create the tray icon. The window will stay accessible on the taskbar.";
         shell_->initializeTaskbar();
+        // Refresh the notification identity when this portable executable has
+        // moved, even if no timer reaches its deadline during this launch.
+        notifications_.setFailureTarget(window_, notificationFailureMessage);
+        notificationsUsed_ = true;
+        if (!notifications_.clear(L"test")) notificationError_ = notifications_.lastError();
         taskbarPanel_ = std::make_unique<TaskbarStatusPanel>(instance_, window_, trayMessage);
+        if (activation && activation->command == NotificationCommand::Stop &&
+                matchesNotificationSession(controller_.engine(), *activation)) {
+            applyNotificationAction(*activation);
+            recovered.events.erase(std::remove_if(recovered.events.begin(), recovered.events.end(),
+                [&activation](const CompletionEvent& e) { return e.timer == activation->timer; }), recovered.events.end());
+        }
         showUpdate(recovered);
         if (background && controller_.warning().empty()) backgroundWindow();
         else open();
+        if (activation && activation->command == NotificationCommand::Open) applyNotificationAction(*activation);
         refresh();
     }
 
@@ -186,10 +203,10 @@ private:
         startup_ = add(L"BUTTON", L"Start when I sign in (launch in background)", WS_TABSTOP | BS_AUTOCHECKBOX,
                        StartupCheck, 2, 28, 118, 590, 30);
         label(L"Install in a stable folder before enabling sign-in startup.", 2, 48, 153, 550, 40);
-        statusCheck_ = add(L"BUTTON", L"Show Pomodoro status in taskbar", WS_TABSTOP | BS_AUTOCHECKBOX,
+        statusCheck_ = add(L"BUTTON", L"Show timer status in taskbar", WS_TABSTOP | BS_AUTOCHECKBOX,
                            StatusCheck, 2, 28, 208, 590, 30);
-        label(L"Shows the active Pomodoro phase and remaining time.", 2, 48, 243, 550, 40);
-        label(L"Main window indicator when both timers are active", 2, 28, 288, 570);
+        label(L"Shows the active timer or Pomodoro phase and remaining time.", 2, 48, 243, 550, 40);
+        label(L"Preferred taskbar timer when both are active", 2, 28, 288, 570);
         source_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | CBS_DROPDOWNLIST,
                       TaskbarCombo, 2, 28, 318, 530, 130);
         ComboBox_AddString(source_, L"Pomodoro"); ComboBox_AddString(source_, L"General timer");
@@ -426,20 +443,31 @@ private:
 
     void showUpdate(const Update& update) {
         if (update.events.empty()) return;
-        if (update.recovery) {
-            notice_ = std::to_wstring(update.events.size()) + L" completion(s) while away. " + currentSummary();
-            if (!shell_->notify(L"Timers updated", notice_, controller_.preferences().soundEnabled))
-                notice_ += L" Windows rejected the notification request.";
-        } else {
-            for (const auto& event : update.events) {
-                std::wstring title;
-                if (event.timer == TimerKind::Countdown) title = L"Timer completed";
-                else if (event.final) title = L"Pomodoro completed — final break finished";
-                else title = event.phase == Phase::Focus ? L"Focus completed — break started" : L"Break completed — focus started";
-                notice_ = title + L". " + currentSummary();
-                if (!shell_->notify(title, currentSummary(), controller_.preferences().soundEnabled))
-                    notice_ += L" Windows rejected the notification request.";
-            }
+        for (auto& notification : completionNotifications(controller_.engine(), update.events,
+                controller_.now(), update.recovery, controller_.preferences().soundEnabled)) {
+            notice_ = notification.title + L". " + notification.body;
+            outbox_.post(std::move(notification), controller_.now());
+        }
+    }
+
+    void clearNotification(TimerKind timer) {
+        outbox_.cancel(timer);
+        // Lazy initialization keeps tests and an unused notification backend
+        // from registering a shortcut or protocol handler.
+        if ((runtimeIntegration_ || notificationsUsed_) &&
+            !notifications_.clear(timer == TimerKind::Pomodoro ? L"pomodoro" : L"countdown"))
+            notificationError_ = notifications_.lastError();
+    }
+
+    void applyNotificationAction(const NotificationAction& action) {
+        if (action.command == NotificationCommand::Open) {
+            const int page = action.timer == TimerKind::Pomodoro ? 0 : 1;
+            TabCtrl_SetCurSel(tabs_, page); choosePage(page); open();
+        } else if (matchesNotificationSession(controller_.engine(), action)) {
+            if (action.timer == TimerKind::Pomodoro) controller_.resetPomodoro();
+            else controller_.resetCountdown();
+            clearNotification(action.timer);
+            notice_ = action.timer == TimerKind::Pomodoro ? L"Pomodoro stopped." : L"Timer stopped.";
         }
     }
 
@@ -474,23 +502,36 @@ private:
         shell_->updateTooltip(currentSummary());
         std::wstring panelWarning;
         if (taskbarPanel_) {
-            const bool showPanel = controller_.preferences().showTaskbarStatus && active(p.status);
+            const bool showPanel = controller_.preferences().showTaskbarStatus && active(selectedStatus);
             const std::wstring panelPhase = p.phase == Phase::Focus ? L"Focus " : L"Break ";
             const std::wstring panelCycle = (p.status == Status::Paused ? L"Paused · " : L"Cycle ") +
                 std::to_wstring(p.cycle) + L" / " + std::to_wstring(p.config.cycles);
-            taskbarPanel_->update(panelPhase + duration(engine.pomodoroRemaining(controller_.now())), panelCycle, showPanel);
+            taskbarPanel_->update((usePomodoro ? panelPhase : L"Timer ") + duration(remaining),
+                usePomodoro ? panelCycle : selectedStatus == Status::Paused ? L"Paused" : L"Countdown", showPanel);
             if (showPanel && !taskbarPanel_->available()) panelWarning = taskbarPanel_->lastError();
         }
-        if (controller_.running() && !schedulerRunning_) {
+        outbox_.discardStale(engine);
+        outbox_.dispatch(controller_.now(), [this](const Notification& notification) {
+            notificationsUsed_ = true;
+            if (notifications_.show(notification.xml, notification.tag)) {
+                notificationError_.clear();
+                return true;
+            }
+            notificationError_ = notifications_.lastError();
+            return false;
+        });
+        const bool needsScheduler = controller_.running() || outbox_.pending();
+        if (needsScheduler && !schedulerRunning_) {
             if (SetTimer(window_, schedulerId, 1000, nullptr)) schedulerRunning_ = true;
             else {
                 notice_ = L"Windows could not start the display scheduler. Reopen the window to refresh timer state.";
                 open();
             }
-        } else if (!controller_.running() && schedulerRunning_) {
+        } else if (!needsScheduler && schedulerRunning_) {
             KillTimer(window_, schedulerId); schedulerRunning_ = false;
         }
         const std::wstring message = !controller_.warning().empty() ? L"Storage/recovery: " + wide(controller_.warning()) :
+            !notificationError_.empty() ? L"Notifications: " + notificationError_ :
             !panelWarning.empty() ? L"Taskbar status: " + panelWarning : notice_;
         SetWindowTextW(status_, message.c_str());
         if (!controller_.warning().empty() && controller_.warning() != lastStorageWarning_) {
@@ -545,6 +586,7 @@ private:
                     auto prefs = controller_.preferences(); prefs.pomodoro = config;
                     controller_.savePreferences(prefs);
                     if (!controller_.startPomodoro(config)) error(L"Could not start with these settings.");
+                    else clearNotification(TimerKind::Pomodoro);
                 }
             }
             break;
@@ -556,14 +598,19 @@ private:
                     auto prefs = controller_.preferences(); prefs.countdownDurationMs = durationMs;
                     controller_.savePreferences(prefs);
                     if (!controller_.startCountdown(durationMs)) error(L"Could not start with this duration.");
+                    else clearNotification(TimerKind::Countdown);
                 }
             }
             break;
         case TogglePomodoro: controller_.togglePomodoro(); break;
         case ToggleCountdown: controller_.toggleCountdown(); break;
-        case PomodoroSkip: controller_.skipPomodoro(); break;
-        case PomodoroReset: controller_.resetPomodoro(); notice_ = L"Pomodoro reset to the saved setup."; break;
-        case CountdownReset: controller_.resetCountdown(); notice_ = L"Timer reset to the saved duration."; break;
+        case PomodoroSkip: controller_.skipPomodoro(); clearNotification(TimerKind::Pomodoro); break;
+        case PomodoroReset:
+            controller_.resetPomodoro(); clearNotification(TimerKind::Pomodoro);
+            notice_ = L"Pomodoro reset to the saved setup."; break;
+        case CountdownReset:
+            controller_.resetCountdown(); clearNotification(TimerKind::Countdown);
+            notice_ = L"Timer reset to the saved duration."; break;
         case SavePomodoro: {
             PomodoroConfig config;
             if (readPomodoro(config)) {
@@ -597,10 +644,18 @@ private:
             if (controller_.savePreferences(prefs)) notice_ = L"Settings saved.";
             break;
         }
-        case TestNotification:
-            notice_ = shell_->notify(L"Pomodoro notification test", L"Local notifications are working. Windows controls banner visibility.",
-                                     Button_GetCheck(sound_) == BST_CHECKED) ? L"Test notification requested." : L"Windows rejected the test notification request.";
+        case TestNotification: {
+            const auto notification = testNotification(Button_GetCheck(sound_) == BST_CHECKED);
+            notificationsUsed_ = true;
+            if (notifications_.show(notification.xml, notification.tag)) {
+                notificationError_.clear();
+                notice_ = L"Windows accepted the test notification request. Notification settings and Focus assist control banner visibility.";
+            } else {
+                notificationError_ = notifications_.lastError();
+                notice_ = L"Test notification failed. " + notificationError_;
+            }
             break;
+        }
         case ExitApplication:
             if (!controller_.save()) {
                 const auto response = MessageBoxW(window_, (L"Timer state could not be saved.\r\n" + wide(controller_.warning()) +
@@ -641,6 +696,28 @@ private:
             taskbarButtonCreated_ = RegisterWindowMessageW(L"TaskbarButtonCreated");
             buildControls(); return 0;
         case activateMessage: open(); showUpdate(controller_.poll()); refresh(); return 0;
+        case notificationFailureMessage: {
+            const auto error = notifications_.takeFailure();
+            if (!error.empty()) notificationError_ = error;
+            refresh(); return 0;
+        }
+        case WM_COPYDATA: {
+            const auto data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+            if (!data || data->dwData != notificationCopyData || !data->lpData ||
+                data->cbData < sizeof(wchar_t) || data->cbData > 512 || data->cbData % sizeof(wchar_t) != 0) return FALSE;
+            const auto text = static_cast<const wchar_t*>(data->lpData);
+            const auto count = data->cbData / sizeof(wchar_t);
+            if (text[count - 1] != L'\0') return FALSE;
+            const auto action = parseNotificationAction(std::wstring(text, count - 1));
+            if (!action) return FALSE;
+            auto update = controller_.poll();
+            if (action->command == NotificationCommand::Stop && matchesNotificationSession(controller_.engine(), *action)) {
+                update.events.erase(std::remove_if(update.events.begin(), update.events.end(),
+                    [&action](const CompletionEvent& e) { return e.timer == action->timer; }), update.events.end());
+            }
+            applyNotificationAction(*action);
+            showUpdate(update); refresh(); return TRUE;
+        }
         case revealFocusMessage:
             if (GetFocus() == reinterpret_cast<HWND>(wParam)) revealControl(reinterpret_cast<HWND>(wParam));
             return 0;
@@ -719,6 +796,7 @@ private:
             return 0;
         case WM_DESTROY:
             if (schedulerRunning_) KillTimer(window_, schedulerId);
+            notifications_.setFailureTarget(nullptr, 0);
             taskbarPanel_.reset();
             shell_.reset(); PostQuitMessage(0); return 0;
         default: return DefWindowProcW(window_, message, wParam, lParam);
@@ -730,6 +808,11 @@ private:
     Controller controller_;
     std::unique_ptr<ShellIntegration> shell_;
     std::unique_ptr<TaskbarStatusPanel> taskbarPanel_;
+    WindowsNotifications notifications_;
+    NotificationOutbox outbox_;
+    bool notificationsUsed_ = false;
+    bool runtimeIntegration_ = false;
+    std::wstring notificationError_;
     std::vector<Placement> placements_;
     HFONT font_ = nullptr, largeFont_ = nullptr;
     UINT dpi_ = 96, taskbarCreated_ = 0, taskbarButtonCreated_ = 0;
@@ -751,6 +834,27 @@ struct ComLifetime {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    int argumentCount = 0;
+    LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+    bool background = false;
+    std::optional<NotificationAction> activation;
+    std::wstring activationUri;
+    bool invalidActivation = false;
+    if (arguments) {
+        for (int i = 1; i < argumentCount; ++i) {
+            if (std::wstring(arguments[i]) == L"--background") background = true;
+            else if (std::wstring(arguments[i]) == L"--notification") {
+                if (++i < argumentCount && !activation) {
+                    activationUri = arguments[i];
+                    activation = parseNotificationAction(activationUri);
+                    if (!activation) invalidActivation = true;
+                } else invalidActivation = true;
+            }
+        }
+        LocalFree(arguments);
+    }
+    if (invalidActivation) return 1;
+    if (activation && activation->command == NotificationCommand::Stop) background = true;
     UniqueHandle mutex(CreateMutexW(nullptr, TRUE, L"Local\\PomodoroNative.SingleInstance.v1"));
     if (!mutex) { MessageBoxW(nullptr, L"Could not create the single-instance guard.", L"Pomodoro", MB_OK | MB_ICONERROR); return 1; }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -762,7 +866,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (existing) {
             DWORD processId = 0;
             GetWindowThreadProcessId(existing, &processId);
-            AllowSetForegroundWindow(processId);
+            if (!activation || activation->command == NotificationCommand::Open) AllowSetForegroundWindow(processId);
+            if (activation) {
+                COPYDATASTRUCT data{notificationCopyData,
+                    static_cast<DWORD>((activationUri.size() + 1) * sizeof(wchar_t)), activationUri.data()};
+                DWORD_PTR accepted = 0;
+                return SendMessageTimeoutW(existing, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 5000, &accepted) && accepted ? 0 : 1;
+            }
             PostMessageW(existing, activateMessage, 0, 0);
         }
         return 0;
@@ -776,14 +887,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         WindowsClock clock;
         MainWindow app(instance, store, clock);
         if (!app.create()) throw std::runtime_error("Could not create the Pomodoro window.");
-        int count = 0;
-        LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &count);
-        bool background = false;
-        if (arguments) {
-            for (int i = 1; i < count; ++i) if (std::wstring(arguments[i]) == L"--background") background = true;
-            LocalFree(arguments);
-        }
-        app.begin(background);
+        app.begin(background, activation);
         MSG message{};
         int result;
         while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {

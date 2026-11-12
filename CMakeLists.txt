@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Pomodoro VERSION 1.1.0 LANGUAGES CXX)
+project(Pomodoro VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_library(pomodoro_core
     src/core/timer_engine.cpp
     src/persistence/state_store.cpp
-    src/app/controller.cpp)
+    src/app/controller.cpp
+    src/app/notifications.cpp)
 target_include_directories(pomodoro_core PUBLIC include)
 if(WIN32)
     # Apply to every consumer, including tests that include windows.h directly.
@@ -37,6 +38,7 @@ if(WIN32)
 
     add_executable(Pomodoro WIN32 src/ui/main_window.cpp
         src/platform/windows_shell.cpp src/platform/clock.cpp
+        src/platform/windows_notifications.cpp
         src/platform/taskbar_status_panel.cpp)
     pomodoro_embed_windows_resources(Pomodoro)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
@@ -63,7 +65,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(suite IN ITEMS timer_engine state_store controller)
+    foreach(suite IN ITEMS timer_engine state_store controller notifications)
         add_executable(${suite}_tests tests/${suite}_tests.cpp)
         target_link_libraries(${suite}_tests PRIVATE pomodoro_core)
         add_test(NAME ${suite} COMMAND ${suite}_tests)
@@ -72,6 +74,7 @@ if(BUILD_TESTING)
     if(WIN32)
         add_executable(windows_ui_tests tests/windows_ui_tests.cpp
             src/platform/windows_shell.cpp src/platform/clock.cpp
+            src/platform/windows_notifications.cpp
             src/platform/taskbar_status_panel.cpp)
         pomodoro_embed_windows_resources(windows_ui_tests)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32

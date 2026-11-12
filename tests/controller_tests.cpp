@@ -376,6 +376,127 @@ void commandsUseOneSampledClockTransaction() {
     CHECK(clock.reads == 2);
 }
 
+void resetDuringFinalBreakDoesNotSuppressLaterSessions() {
+    TemporaryDirectory files;
+    StateStore store(files.path);
+    auto clock = clockAtLaunch();
+    Controller controller(store, clock);
+    (void)controller.load();
+    auto preferences = controller.preferences();
+    preferences.pomodoro = {2'000, 2'000, 2};
+    preferences.countdownDurationMs = 2'000;
+    CHECK(controller.savePreferences(preferences));
+    CHECK(controller.startPomodoro(preferences.pomodoro));
+    const auto firstSession = controller.engine().pomodoro.sessionId;
+
+    // Finish focus/break/focus, then Reset partway through the final break,
+    // matching the reported sequence. Poll each second as the UI scheduler does.
+    for (int second = 1; second <= 7; ++second) {
+        clock.advance(1'000);
+        const auto update = controller.poll();
+        CHECK(!update.recovery);
+        CHECK(update.events.size() == (second % 2 == 0 ? 1u : 0u));
+        if (!update.events.empty()) {
+            const auto& event = update.events[0];
+            CHECK(event.timer == TimerKind::Pomodoro);
+            CHECK(event.sequence == static_cast<std::uint64_t>(second / 2));
+        }
+    }
+    CHECK(controller.engine().pomodoro.phase == Phase::Break);
+    CHECK(controller.engine().pomodoro.cycle == 2);
+    controller.resetPomodoro();
+    const auto reset = store.loadState();
+    CHECK(reset.warning.empty());
+    CHECK(reset.value.pomodoro.status == Status::Idle);
+    CHECK(reset.value.pomodoro.phase == Phase::Focus);
+    CHECK(reset.value.pomodoro.cycle == 1);
+    CHECK(reset.value.pomodoroNotificationSequence == 0);
+
+    CHECK(controller.startCountdown(preferences.countdownDurationMs));
+    clock.advance(1'000); // The old final-break deadline must have no effect.
+    CHECK(controller.poll().events.empty());
+    clock.advance(1'000);
+    const auto timerFinished = controller.poll();
+    CHECK(timerFinished.events.size() == 1);
+    CHECK(timerFinished.events[0].timer == TimerKind::Countdown);
+    CHECK(timerFinished.events[0].sequence == 1);
+    CHECK(controller.startPomodoro(preferences.pomodoro));
+    CHECK(controller.engine().pomodoro.sessionId != firstSession);
+    CHECK(controller.engine().pomodoro.phase == Phase::Focus);
+    CHECK(controller.engine().pomodoro.cycle == 1);
+
+    // Each phase lasts its complete configured duration and produces a fresh
+    // completion event, including both breaks in the second session.
+    for (int phase = 0; phase < 4; ++phase) {
+        clock.advance(1'000);
+        CHECK(controller.poll().events.empty());
+        CHECK(controller.engine().pomodoroRemaining(controller.now()) == 1'000);
+        clock.advance(1'000);
+        const auto update = controller.poll();
+        CHECK(!update.recovery && update.events.size() == 1);
+        const auto& event = update.events[0];
+        CHECK(event.timer == TimerKind::Pomodoro);
+        CHECK(event.phase == (phase % 2 == 0 ? Phase::Focus : Phase::Break));
+        CHECK(event.cycle == phase / 2 + 1);
+        CHECK(event.sequence == static_cast<std::uint64_t>(phase + 1));
+        CHECK(event.final == (phase == 3));
+    }
+    CHECK(controller.engine().pomodoro.status == Status::Completed);
+    CHECK(controller.poll().events.empty());
+
+    Controller reopened(store, clock);
+    CHECK(reopened.load().events.empty());
+    CHECK(reopened.startCountdown(1'000));
+    clock.advance(1'000);
+    const auto nextTimer = reopened.poll();
+    CHECK(nextTimer.events.size() == 1);
+    CHECK(nextTimer.events[0].timer == TimerKind::Countdown);
+    CHECK(nextTimer.events[0].sequence == 1);
+    CHECK(reopened.startPomodoro(preferences.pomodoro));
+    clock.advance(1'000);
+    CHECK(reopened.poll().events.empty());
+    clock.advance(1'000);
+    const auto nextFocus = reopened.poll();
+    CHECK(nextFocus.events.size() == 1);
+    CHECK(nextFocus.events[0].timer == TimerKind::Pomodoro);
+    CHECK(nextFocus.events[0].phase == Phase::Focus);
+    CHECK(nextFocus.events[0].sequence == 1);
+    CHECK(reopened.engine().pomodoro.phase == Phase::Break);
+    CHECK(reopened.engine().pomodoroRemaining(reopened.now()) == 2'000);
+    CHECK(reopened.warning().empty());
+}
+
+void resetAtPhaseBoundaryRetainsOnlyNewSessionEvents() {
+    TemporaryDirectory files;
+    StateStore store(files.path);
+    auto clock = clockAtLaunch();
+    Controller controller(store, clock);
+    (void)controller.load();
+    CHECK(controller.startPomodoro({1'000, 1'000, 1}));
+    clock.advance(1'000);
+    const auto oldFocus = controller.poll(); // Commands reconcile due events first.
+    CHECK(oldFocus.events.size() == 1 && oldFocus.events[0].phase == Phase::Focus);
+    controller.resetPomodoro();
+    CHECK(controller.startPomodoro({2'000, 2'000, 1}));
+    clock.advance(1'000); // The previous session's final-break deadline.
+    CHECK(controller.poll().events.empty());
+    CHECK(controller.engine().pomodoro.phase == Phase::Focus);
+    clock.advance(1'000);
+    const auto freshFocus = controller.poll();
+    CHECK(freshFocus.events.size() == 1);
+    CHECK(freshFocus.events[0].phase == Phase::Focus);
+    CHECK(freshFocus.events[0].sequence == 1);
+    CHECK(controller.engine().pomodoroRemaining(controller.now()) == 2'000);
+    clock.advance(1'000);
+    CHECK(controller.poll().events.empty());
+    clock.advance(1'000);
+    const auto freshBreak = controller.poll();
+    CHECK(freshBreak.events.size() == 1);
+    CHECK(freshBreak.events[0].phase == Phase::Break && freshBreak.events[0].final);
+    CHECK(freshBreak.events[0].sequence == 2);
+    CHECK(controller.warning().empty());
+}
+
 } // namespace
 
 int main() {
@@ -393,7 +514,9 @@ int main() {
         saveErrorsRemainVisibleAndAreRecoverable();
         idlePollsAndDisplayUpdatesDoNotRewriteState();
         commandsUseOneSampledClockTransaction();
-        std::cout << "13 controller scenarios passed\n";
+        resetDuringFinalBreakDoesNotSuppressLaterSessions();
+        resetAtPhaseBoundaryRetainsOnlyNewSessionEvents();
+        std::cout << "15 controller scenarios passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

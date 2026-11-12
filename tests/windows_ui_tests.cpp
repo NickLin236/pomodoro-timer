@@ -124,18 +124,34 @@ public:
     PanelCallbacks callbacks;
     HWND window = nullptr;
     HWND taskList = nullptr;
+    HWND monitorContainer = nullptr;
     HWND trafficMonitor = nullptr;
+    HWND notificationArea = nullptr;
 
     SyntheticTaskbar() {
         window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            L"STATIC", L"Pomodoro synthetic taskbar", WS_POPUP,
+            L"STATIC", L"Pomodoro synthetic taskbar", WS_POPUP | WS_BORDER,
             20, 20, 1000, 48, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
         require(window != nullptr, "Could not create synthetic taskbar host");
         taskList = CreateWindowExW(0, L"STATIC", L"Task-list placeholder", WS_CHILD | WS_VISIBLE,
-            0, 0, 640, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+            0, 0, 1000, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        monitorContainer = CreateWindowExW(0, L"STATIC", L"Monitor container", WS_CHILD | WS_VISIBLE,
+            800, 0, 160, 46, window, nullptr, GetModuleHandleW(nullptr), nullptr);
         trafficMonitor = CreateWindowExW(0, L"STATIC", L"TrafficMonitorTaskbarWindow", WS_CHILD | WS_VISIBLE,
-            800, 0, 200, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!taskList || !trafficMonitor ||
+            0, 0, 160, 46, monitorContainer, nullptr, GetModuleHandleW(nullptr), nullptr);
+        WNDCLASSW notificationType{};
+        notificationType.lpfnWndProc = DefWindowProcW;
+        notificationType.hInstance = GetModuleHandleW(nullptr);
+        notificationType.lpszClassName = L"TrayNotifyWnd";
+        if (!GetClassInfoW(notificationType.hInstance, notificationType.lpszClassName, &notificationType)) {
+            notificationType.lpfnWndProc = DefWindowProcW;
+            notificationType.hInstance = GetModuleHandleW(nullptr);
+            notificationType.lpszClassName = L"TrayNotifyWnd";
+            require(RegisterClassW(&notificationType) != 0, "Could not register synthetic notification-area class");
+        }
+        notificationArea = CreateWindowExW(0, L"TrayNotifyWnd", L"Notification area", WS_CHILD | WS_VISIBLE,
+            960, 0, 38, 46, window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!taskList || !monitorContainer || !trafficMonitor || !notificationArea ||
             !SetWindowSubclass(window, panelHostProcedure, 1, reinterpret_cast<DWORD_PTR>(&callbacks))) {
             DestroyWindow(window);
             window = nullptr;
@@ -169,6 +185,13 @@ void requireSameBounds(HWND window, const RECT& expected, const char* failure) {
     require(EqualRect(&actual, &expected) != FALSE, failure);
 }
 
+RECT clientScreenBounds(HWND window) {
+    RECT bounds{};
+    require(GetClientRect(window, &bounds) != FALSE, "Could not read synthetic taskbar client area");
+    MapWindowPoints(window, HWND_DESKTOP, reinterpret_cast<POINT*>(&bounds), 2);
+    return bounds;
+}
+
 std::wstring windowCaption(HWND window) {
     std::wstring text(static_cast<std::size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
     const auto length = GetWindowTextW(window, text.data(), static_cast<int>(text.size()));
@@ -176,9 +199,33 @@ std::wstring windowCaption(HWND window) {
     return text;
 }
 
+void notificationXmlUsesWindowsRuntimeWithoutSending() {
+    std::wstring error;
+    require(validateNotificationXml(testNotification().xml, error),
+            "Windows Runtime rejected the test notification XML or toast ABI");
+    TimerEngine engine;
+    require(engine.startPomodoro({2'000, 1'000, 1}, 0, "native-smoke-pomo"),
+            "Could not start the notification smoke-test Pomodoro");
+    require(engine.startCountdown(2'000, 0, "native-smoke-timer"),
+            "Could not start the notification smoke-test countdown");
+    const auto events = engine.advance(2'000);
+    const auto notices = completionNotifications(engine, events, 2'000, false, false);
+    require(notices.size() == 2, "Notification smoke test did not produce both timer types");
+    for (const auto& notice : notices) {
+        error.clear();
+        require(validateNotificationXml(notice.xml, error),
+                "Windows Runtime rejected a silent completion notification XML or toast ABI");
+    }
+    error.clear();
+    require(!validateNotificationXml(L"<toast><visual>", error),
+            "Windows Runtime accepted malformed notification XML");
+    require(!error.empty(), "Malformed notification XML did not provide a diagnostic");
+}
+
 void taskbarStatusUsesOnlyItsSyntheticHost() {
     SyntheticTaskbar host;
     const auto hostBefore = screenBounds(host.window);
+    const auto hostClient = clientScreenBounds(host.window);
     const auto taskListBefore = screenBounds(host.taskList);
     const auto monitorBefore = screenBounds(host.trafficMonitor);
     HWND panelWindow = nullptr;
@@ -193,8 +240,10 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
         const auto panelBounds = screenBounds(panelWindow);
         require(panelBounds.right <= monitorBefore.left && panelBounds.left >= hostBefore.left,
                 "Status panel was not placed to the left of Traffic Monitor");
-        require(panelBounds.top >= hostBefore.top && panelBounds.bottom <= hostBefore.bottom,
-                "Status panel extends outside the taskbar vertically");
+        require(panelBounds.top >= hostClient.top && panelBounds.bottom <= hostClient.bottom,
+                "Status panel extends outside the taskbar client area vertically");
+        require(GetTopWindow(host.window) == panelWindow,
+                "Status panel is behind the task-list container");
         requireSameBounds(host.window, hostBefore, "Status panel resized or moved the taskbar host");
         requireSameBounds(host.taskList, taskListBefore, "Status panel resized or moved the task list");
         requireSameBounds(host.trafficMonitor, monitorBefore, "Status panel resized or moved Traffic Monitor");
@@ -213,6 +262,31 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
         caption = windowCaption(panel.handle());
         require(caption.find(L"Break 04:59") != std::wstring::npos && caption.find(L"Paused") != std::wstring::npos,
                 "Status panel did not update the break/paused display");
+        SetWindowPos(host.taskList, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        panel.update(L"Timer 00:59", L"Countdown", true);
+        require(GetTopWindow(host.window) == panelWindow,
+                "Refreshing status did not restore visibility above the task-list container");
+        require(windowCaption(panelWindow).find(L"Timer 00:59") != std::wstring::npos,
+                "Status panel did not expose countdown text");
+
+        // A visible descendant of a hidden monitor container must not mask the
+        // notification-area fallback. Explorer can retain old hidden windows.
+        ShowWindow(host.monitorContainer, SW_HIDE);
+        panel.update(L"Timer 00:58", L"Countdown", true);
+        require(panel.available(), "Status panel lost its notification-area fallback");
+        require(screenBounds(panelWindow).right > monitorBefore.left &&
+                screenBounds(panelWindow).right <= screenBounds(host.notificationArea).left,
+                "Status panel anchored to a hidden Traffic Monitor instead of the notification area");
+        ShowWindow(host.monitorContainer, SW_SHOWNOACTIVATE);
+        const auto staleMonitor = CreateWindowExW(0, L"STATIC", L"TrafficMonitorTaskbarWindow",
+            WS_CHILD | WS_VISIBLE, 1200, 0, 100, 40, host.window, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        require(staleMonitor != nullptr, "Could not create off-taskbar stale monitor");
+        panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
+        require(panel.available() && screenBounds(panelWindow).right <= monitorBefore.left,
+                "An off-taskbar Traffic Monitor prevented a valid descendant anchor from being used");
+        DestroyWindow(staleMonitor);
         panel.update(L"", L"", false);
         require(!IsWindowVisible(panel.handle()), "Disabled or idle status panel remained visible");
         panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
@@ -293,6 +367,57 @@ void settingsAndCloseBehavior() {
     require(!store.loadPreferences().value.startAtSignIn, "Startup Off preference did not persist");
     require(!IsWindowVisible(window), "Settings test unexpectedly showed the hidden window");
 
+    // Drive the real cross-process notification handler without registering a
+    // protocol/shortcut or sending anything to the user's notification center.
+    const auto click = [window](int id) {
+        SendMessageW(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(GetDlgItem(window, id)));
+    };
+    const auto activate = [window](const std::wstring& uri) {
+        COPYDATASTRUCT data{notificationCopyData,
+            static_cast<DWORD>((uri.size() + 1) * sizeof(wchar_t)), const_cast<wchar_t*>(uri.c_str())};
+        return SendMessageW(window, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data));
+    };
+    const auto stopUri = [](const wchar_t* timer, const std::string& session) {
+        return std::wstring(L"pomodoro-native://stop/") + timer + L"/" + std::wstring(session.begin(), session.end());
+    };
+    SetDlgItemTextW(window, FocusInput, L"1");
+    SetDlgItemTextW(window, BreakInput, L"1");
+    SetDlgItemTextW(window, CyclesInput, L"2");
+    SetDlgItemTextW(window, HoursInput, L"0");
+    SetDlgItemTextW(window, MinutesInput, L"5");
+    SetDlgItemTextW(window, SecondsInput, L"0");
+    click(PomodoroAction); click(CountdownAction);
+    const auto firstSession = store.loadState().value;
+    require(firstSession.pomodoro.status == Status::Running && firstSession.countdown.status == Status::Running,
+            "Notification action regression did not start both sessions");
+    require(activate(L"pomodoro-native://stop/pomodoro/notification-test") == TRUE,
+            "Valid test activation was rejected");
+    require(store.loadState().value.pomodoro.status == Status::Running,
+            "Test notification Stop changed a live session");
+    require(activate(L"pomodoro-native://stop/pomodoro/invalid?command=reset") == FALSE,
+            "Malformed notification activation was accepted");
+    require(activate(stopUri(L"countdown", firstSession.countdown.sessionId)) == TRUE,
+            "Countdown notification action was rejected");
+    require(store.loadState().value.countdown.status == Status::Idle &&
+            store.loadState().value.pomodoro.status == Status::Running,
+            "Countdown Stop changed the other timer");
+    click(CountdownAction);
+    require(activate(stopUri(L"countdown", firstSession.countdown.sessionId)) == TRUE,
+            "Stale notification URI was not parsed");
+    require(store.loadState().value.countdown.status == Status::Running,
+            "A stale notification stopped a new countdown session");
+    // Stop at a due phase boundary must suppress the just-completed phase's
+    // notice, rather than enqueue a toast for the session being stopped.
+    clock.advance(60'000);
+    require(activate(stopUri(L"pomodoro", firstSession.pomodoro.sessionId)) == TRUE,
+            "Pomodoro notification action was rejected");
+    require(store.loadState().value.pomodoro.status == Status::Idle &&
+            store.loadState().value.countdown.status == Status::Running,
+            "Pomodoro Stop did not reset only its matching session");
+    require(!IsWindowVisible(window), "Stop unexpectedly opened the hidden main window");
+    click(CountdownReset);
+
     // Close must terminate the window, including an active session, rather
     // than hiding it in the tray. Its saved UTC deadline remains recoverable.
     SetDlgItemTextW(window, HoursInput, L"0");
@@ -323,9 +448,10 @@ int main() {
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
         require(InitCommonControlsEx(&controls) != FALSE, "Could not initialize native controls");
+        notificationXmlUsesWindowsRuntimeWithoutSending();
         taskbarStatusUsesOnlyItsSyntheticHost();
         settingsAndCloseBehavior();
-        std::cout << "Windows UI taskbar, settings, startup, and close regression tests passed\n";
+        std::cout << "Windows UI taskbar, settings, startup, notification actions, and close regression tests passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Windows UI regression test failed: " << error.what() << '\n';

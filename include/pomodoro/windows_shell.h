@@ -26,8 +26,6 @@ public:
     [[nodiscard]] bool restoreTray();
     [[nodiscard]] bool trayInstalled() const noexcept { return trayInstalled_; }
     void updateTooltip(const std::wstring& tooltip);
-    [[nodiscard]] bool notify(const std::wstring& title, const std::wstring& body,
-                              bool sound);
     void initializeTaskbar();
     void setTaskbar(ULONGLONG completed, ULONGLONG total, bool paused, bool active);
     void clearTaskbar();

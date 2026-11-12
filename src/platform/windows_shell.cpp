@@ -135,18 +135,6 @@ void ShellIntegration::updateTooltip(const std::wstring& tooltip) {
     Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
-bool ShellIntegration::notify(const std::wstring& title,
-                              const std::wstring& body, bool sound) {
-    if (!trayInstalled_ && !installTray()) return false;
-    auto data = iconData();
-    data.uFlags |= NIF_INFO;
-    copyText(data.szInfoTitle, title);
-    copyText(data.szInfo, body);
-    data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-    if (!sound) data.dwInfoFlags |= NIIF_NOSOUND;
-    return Shell_NotifyIconW(NIM_MODIFY, &data) != FALSE;
-}
-
 void ShellIntegration::initializeTaskbar() {
     if (taskbar_ != nullptr) {
         taskbar_->Release();

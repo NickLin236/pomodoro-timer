@@ -22,9 +22,12 @@ if (Test-Path -LiteralPath $runKey) {
     }
 }
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Pomodoro.lnk'
-if (Test-Path -LiteralPath $shortcutPath) {
+$programs = [Environment]::GetFolderPath('Programs')
+foreach ($shortcutName in @('Pomodoro.lnk', 'Pomodoro Notifications.lnk')) {
+    $shortcutPath = Join-Path $programs $shortcutName
+    if (-not (Test-Path -LiteralPath $shortcutPath)) { continue }
     $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $null
     try {
         $shortcut = $shell.CreateShortcut($shortcutPath)
         if ($shortcut.TargetPath -eq $installedExecutable) {
@@ -33,6 +36,22 @@ if (Test-Path -LiteralPath $shortcutPath) {
     } finally {
         if ($shortcut) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) }
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+    }
+}
+
+# A portable copy may have refreshed this shared handler. Remove it only when
+# it still belongs to the executable this script is uninstalling.
+$protocolKey = 'HKCU:\Software\Classes\pomodoro-native'
+$protocolCommandKey = Join-Path $protocolKey 'shell\open\command'
+$expectedProtocolCommand = '"' + $installedExecutable + '" --notification "%1"'
+if (Test-Path -LiteralPath $protocolCommandKey) {
+    if ((Get-Item -LiteralPath $protocolCommandKey).GetValue('') -eq $expectedProtocolCommand) {
+        Remove-Item -LiteralPath $protocolKey -Recurse -Force
+        $identityKey = 'HKCU:\Software\Classes\AppUserModelId\PomodoroNative.Desktop'
+        if ((Test-Path -LiteralPath $identityKey) -and
+            (Get-Item -LiteralPath $identityKey).GetValue('CustomActivator') -eq '{83EDB410-F73C-4E5B-9B72-04B2D1A5D931}') {
+            Remove-Item -LiteralPath $identityKey -Recurse -Force
+        }
     }
 }
 
