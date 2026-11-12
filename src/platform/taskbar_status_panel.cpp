@@ -1,18 +1,17 @@
 #include "pomodoro/taskbar_status_panel.h"
+#include "pomodoro/taskbar_layout.h"
+#include "pomodoro/taskbar_obstacles.h"
 
 #ifdef _WIN32
 #include <shellapi.h>
 #include <algorithm>
 #include <cstring>
-#include <iterator>
-#include <map>
-#include <vector>
 #include <utility>
 
 namespace pomodoro {
 namespace {
 constexpr wchar_t panelClass[] = L"PomodoroNative.TaskbarStatus.v1";
-constexpr wchar_t trafficMonitorTitle[] = L"TrafficMonitorTaskbarWindow";
+constexpr UINT_PTR layoutTimerId = 1;
 
 template <typename Function>
 Function user32Function(const char* name) {
@@ -42,122 +41,6 @@ private:
     HANDLE previous_ = nullptr;
 };
 
-bool intersects(const RECT& first, const RECT& second) {
-    RECT intersection{};
-    return IntersectRect(&intersection, &first, &second) != FALSE;
-}
-
-struct AnchorSearch {
-    HWND host;
-    RECT clientBounds;
-    DWORD hostProcess = 0;
-    bool found = false;
-    RECT boundary{};
-    std::map<DWORD, bool> trafficProcesses{};
-    unsigned textRequests = 0;
-};
-
-bool isContainer(const std::wstring& name) {
-    return name == L"ReBarWindow32" || name == L"WorkerW" ||
-        name == L"MSTaskSwWClass" || name == L"MSTaskListWClass" ||
-        name == L"Windows.UI.Composition.DesktopWindowContentBridge";
-}
-
-bool isTaskListDescendant(HWND window, HWND host) {
-    for (HWND parent = window; parent && parent != host; parent = GetParent(parent)) {
-        wchar_t name[128]{};
-        GetClassNameW(parent, name, static_cast<int>(std::size(name)));
-        if (std::wstring(name) == L"MSTaskSwWClass" || std::wstring(name) == L"MSTaskListWClass")
-            return true;
-    }
-    return false;
-}
-
-bool isTrafficMonitorProcess(DWORD process, AnchorSearch& search) {
-    if (!process || process == search.hostProcess || process == GetCurrentProcessId()) return false;
-    const auto cached = search.trafficProcesses.find(process);
-    if (cached != search.trafficProcesses.end()) return cached->second;
-    bool trafficMonitor = false;
-    HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process);
-    if (handle) {
-        std::vector<wchar_t> path(32768);
-        DWORD length = static_cast<DWORD>(path.size());
-        if (QueryFullProcessImageNameW(handle, 0, path.data(), &length)) {
-            const std::wstring image(path.data(), length);
-            const auto slash = image.find_last_of(L"\\/");
-            const std::wstring name = image.substr(slash == std::wstring::npos ? 0 : slash + 1);
-            trafficMonitor = name.size() >= 18 &&
-                CompareStringOrdinal(name.c_str(), 14, L"TrafficMonitor", 14, TRUE) == CSTR_EQUAL &&
-                CompareStringOrdinal(name.c_str() + name.size() - 4, 4, L".exe", 4, TRUE) == CSTR_EQUAL;
-        }
-        CloseHandle(handle);
-    }
-    search.trafficProcesses.emplace(process, trafficMonitor);
-    return trafficMonitor;
-}
-
-void includeBoundary(AnchorSearch& search, const RECT& bounds) {
-    if (!search.found || bounds.left < search.boundary.left) search.boundary = bounds;
-    search.found = true;
-}
-
-BOOL examineTaskbarWindow(HWND window, AnchorSearch& search, bool descendant) {
-    if (descendant) {
-        // Explorer can retain hidden children while rebuilding its taskbar.
-        for (HWND current = window; current && current != search.host; current = GetParent(current)) {
-            if (!(GetWindowLongPtrW(current, GWL_STYLE) & WS_VISIBLE)) return TRUE;
-        }
-    } else if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE)) return TRUE;
-    RECT bounds{};
-    if (!GetWindowRect(window, &bounds)) return TRUE;
-    MapWindowPoints(HWND_DESKTOP, search.host, reinterpret_cast<POINT*>(&bounds), 2);
-    if (bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
-        !intersects(search.clientBounds, bounds)) return TRUE;
-    wchar_t classBuffer[128]{};
-    GetClassNameW(window, classBuffer, static_cast<int>(std::size(classBuffer)));
-    const std::wstring className(classBuffer);
-    if (className == panelClass || className == L"tooltips_class32" || isContainer(className)) return TRUE;
-
-    const LONG hostWidth = search.clientBounds.right - search.clientBounds.left;
-    const LONG hostHeight = search.clientBounds.bottom - search.clientBounds.top;
-    const bool compact = bounds.right - bounds.left <= hostWidth / 2 &&
-        bounds.bottom - bounds.top <= hostHeight * 2 &&
-        bounds.top >= search.clientBounds.top - 2 && bounds.bottom <= search.clientBounds.bottom + 2;
-    if (!compact && className != L"TrayNotifyWnd") return TRUE;
-
-    wchar_t title[128]{};
-    GetWindowTextW(window, title, static_cast<int>(std::size(title)));
-    DWORD process = 0;
-    GetWindowThreadProcessId(window, &process);
-    bool trafficMonitor = std::wstring(title) == trafficMonitorTitle || className == trafficMonitorTitle;
-    if (!trafficMonitor && compact && process != search.hostProcess && process != GetCurrentProcessId()) {
-        // GetWindowText does not reliably retrieve custom text from another
-        // process's child controls. A bounded request also handles MFC dialogs
-        // whose caption cache is empty. Never let a hung widget block a tick.
-        DWORD_PTR copied = 0;
-        if (search.textRequests++ < 3 && SendMessageTimeoutW(window, WM_GETTEXT, std::size(title), reinterpret_cast<LPARAM>(title),
-                SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &copied))
-            trafficMonitor = std::wstring(title) == trafficMonitorTitle;
-        if (!trafficMonitor) trafficMonitor = isTrafficMonitorProcess(process, search);
-    }
-    if (trafficMonitor) includeBoundary(search, bounds);
-    // News and interests, taskbar toolbars and other compact widgets can sit
-    // between Traffic Monitor and the tray, or to its left. Use the left edge
-    // of the whole right-side group, not just the tray's immediate neighbour.
-    // Task-list containers span unused button space, so they are not widgets.
-    if (descendant && compact && bounds.left >= search.clientBounds.left + hostWidth / 2 &&
-        !isTaskListDescendant(window, search.host))
-        includeBoundary(search, bounds);
-    if (className == L"TrayNotifyWnd") includeBoundary(search, bounds);
-    return TRUE;
-}
-
-BOOL CALLBACK findTaskbarAnchor(HWND window, LPARAM result) {
-    return examineTaskbarWindow(window, *reinterpret_cast<AnchorSearch*>(result), true);
-}
-BOOL CALLBACK findFloatingTrafficMonitor(HWND window, LPARAM result) {
-    return examineTaskbarWindow(window, *reinterpret_cast<AnchorSearch*>(result), false);
-}
 } // namespace
 
 TaskbarStatusPanel::TaskbarStatusPanel(HINSTANCE instance, HWND owner,
@@ -198,7 +81,7 @@ bool TaskbarStatusPanel::create(HWND host) {
     return true;
 }
 
-bool TaskbarStatusPanel::locate(HWND& host, RECT& hostBounds, RECT& anchorBounds) {
+bool TaskbarStatusPanel::locate(HWND& host, RECT& hostBounds) {
     host = explicitHost_ ? explicitHost_ : FindWindowW(L"Shell_TrayWnd", nullptr);
     if (!host || !IsWindow(host)) {
         fail(L"The Windows taskbar is unavailable; status will return when Explorer is ready.");
@@ -213,20 +96,6 @@ bool TaskbarStatusPanel::locate(HWND& host, RECT& hostBounds, RECT& anchorBounds
         fail(L"The status panel requires a horizontal Windows taskbar.");
         return false;
     }
-    // The task-list class and nesting differ between Explorer releases and
-    // taskbar replacements. Placement needs only a visible anchor, so do not
-    // reject a working Traffic Monitor based on unrelated task-list classes.
-    AnchorSearch search{host, hostBounds};
-    GetWindowThreadProcessId(host, &search.hostProcess);
-    EnumChildWindows(host, findTaskbarAnchor, reinterpret_cast<LPARAM>(&search));
-    // Traffic Monitor may fall back to a tiny top-level taskbar-aligned window
-    // when SetParent fails. Its source explicitly supports that configuration.
-    if (!explicitHost_) EnumWindows(findFloatingTrafficMonitor, reinterpret_cast<LPARAM>(&search));
-    if (!search.found) {
-        fail(L"Could not find Traffic Monitor or the taskbar notification area for the status panel.");
-        return false;
-    }
-    anchorBounds = search.boundary;
     return true;
 }
 
@@ -248,7 +117,11 @@ void TaskbarStatusPanel::update(std::wstring firstLine, std::wstring secondLine,
 
 void TaskbarStatusPanel::hide() {
     requestedVisible_ = false;
-    if (window_) ShowWindow(window_, SW_HIDE);
+    if (window_) {
+        ShowWindow(window_, SW_HIDE);
+        if (layoutTimer_) KillTimer(window_, layoutTimerId);
+    }
+    layoutTimer_ = false;
 }
 
 void TaskbarStatusPanel::explorerRestarted() {
@@ -297,16 +170,21 @@ void TaskbarStatusPanel::updateColors(HWND host, const RECT& bounds) {
 void TaskbarStatusPanel::reposition() {
     if (!requestedVisible_ || positioning_) return;
     positioning_ = true;
+    lastLayoutCheck_ = GetTickCount64();
     struct Reset { bool& value; ~Reset() { value = false; } } reset{positioning_};
     HWND host = nullptr;
-    RECT taskbar{}, anchor{};
-    if (!locate(host, taskbar, anchor)) return;
+    RECT taskbar{};
+    if (!locate(host, taskbar)) return;
     DpiScope dpiContext(host);
     if (window_ && (!IsWindow(window_) || host_ != host)) {
         if (IsWindow(window_)) DestroyWindow(window_);
         window_ = nullptr;
     }
     if (!window_ && !create(host)) return;
+    if (!layoutTimer_) {
+        layoutTimer_ = SetTimer(window_, layoutTimerId, 1000, nullptr) != 0;
+        if (!layoutTimer_) { fail(L"Windows could not monitor available taskbar space."); return; }
+    }
 
     using GetDpi = UINT (WINAPI*)(HWND);
     const auto getDpi = user32Function<GetDpi>("GetDpiForWindow");
@@ -328,21 +206,43 @@ void TaskbarStatusPanel::reposition() {
         ReleaseDC(window_, dc);
     }
     const int width = std::clamp(textWidth + 2 * gap, MulDiv(118, static_cast<int>(dpi), 96), MulDiv(180, static_cast<int>(dpi), 96));
-    RECT bounds{anchor.left - gap - width, inset,
-                anchor.left - gap, inset + height};
-    if (bounds.left < MulDiv(48, static_cast<int>(dpi), 96) || bounds.right > taskbar.right - taskbar.left) {
-        fail(L"There is not enough taskbar space to the left of Traffic Monitor for Pomodoro status.");
+    const TaskbarRect strip{MulDiv(48, static_cast<int>(dpi), 96), inset,
+        static_cast<int>(taskbar.right) - inset, static_cast<int>(taskbar.bottom) - inset};
+    const auto snapshot = collectTaskbarObstacles(host, window_, !explicitHost_);
+    if (!snapshot.taskButtonsKnown) {
+        fail(L"Waiting for taskbar button bounds before showing timer status.");
         return;
     }
-    updateColors(host, bounds);
+    const int preferredRight = snapshot.widgetLeft ? *snapshot.widgetLeft - gap : strip.right;
+    const auto slot = findTaskbarSlot(strip, preferredRight, width, height, gap, snapshot.occupied);
+    if (!slot) {
+        fail(L"There is no free taskbar space for timer status. It will return when space is available.");
+        return;
+    }
+    RECT bounds{slot->left, slot->top, slot->right, slot->bottom};
+    RECT previous{};
+    if (!GetWindowRect(window_, &previous)) { fail(L"Windows could not read the timer panel position."); return; }
+    MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&previous), 2);
+    // Keep a moving panel hidden until its actual, potentially DPI-adjusted
+    // rectangle has been checked. Never paint a guessed position first.
+    if (!EqualRect(&previous, &bounds)) ShowWindow(window_, SW_HIDE);
     if (!SetWindowPos(window_, HWND_TOP, bounds.left, bounds.top, width, height,
-                      SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW)) {
-        fail(L"Windows could not position the Pomodoro taskbar status panel.");
+                     SWP_NOACTIVATE | SWP_NOOWNERZORDER)) {
+        fail(L"Windows could not position the timer taskbar status panel.");
         return;
     }
-    // Keep the child's requested visibility intact. The taskbar parent handles
-    // hide/show, offscreen auto-hide movement, and fullscreen z-order; manually
-    // hiding here could leave a paused panel hidden after the parent returns.
+    RECT actual{};
+    if (!GetWindowRect(window_, &actual)) { fail(L"Windows could not verify the timer panel position."); return; }
+    MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&actual), 2);
+    const auto latest = collectTaskbarObstacles(host, window_, !explicitHost_);
+    const TaskbarRect placed{actual.left, actual.top, actual.right, actual.bottom};
+    if (!latest.taskButtonsKnown || actual.right - actual.left != width || actual.bottom - actual.top != height ||
+        !taskbarSlotIsFree(placed, strip, gap, latest.occupied)) {
+        fail(L"Taskbar layout changed; timer status is hidden until a safe gap is available.");
+        return;
+    }
+    updateColors(host, actual);
+    ShowWindow(window_, SW_SHOWNOACTIVATE);
     layoutAvailable_ = true;
     error_.clear();
 }
@@ -387,6 +287,23 @@ LRESULT CALLBACK TaskbarStatusPanel::windowProcedure(HWND window, UINT message,
     }
     if (!self) return DefWindowProcW(window, message, wParam, lParam);
     switch (message) {
+    case taskbarObstaclesReadyMessage: {
+        const bool available = self->layoutAvailable_;
+        const auto error = self->error_;
+        self->reposition();
+        if (available != self->layoutAvailable_ || error != self->error_)
+            PostMessageW(self->owner_, taskbarLayoutChangedMessage, 0, 0);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wParam == layoutTimerId && GetTickCount64() - self->lastLayoutCheck_ >= 900) {
+            const bool available = self->layoutAvailable_;
+            const auto error = self->error_;
+            self->reposition();
+            if (available != self->layoutAvailable_ || error != self->error_)
+                PostMessageW(self->owner_, taskbarLayoutChangedMessage, 0, 0);
+        }
+        return 0;
     case WM_PAINT: self->paint(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
@@ -398,6 +315,7 @@ LRESULT CALLBACK TaskbarStatusPanel::windowProcedure(HWND window, UINT message,
         self->window_ = nullptr;
         self->host_ = nullptr;
         self->layoutAvailable_ = false;
+        self->layoutTimer_ = false;
         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         break;
     default: break;

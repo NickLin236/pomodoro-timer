@@ -696,6 +696,7 @@ private:
             taskbarButtonCreated_ = RegisterWindowMessageW(L"TaskbarButtonCreated");
             buildControls(); return 0;
         case activateMessage: open(); showUpdate(controller_.poll()); refresh(); return 0;
+        case taskbarLayoutChangedMessage: refresh(); return 0;
         case notificationFailureMessage: {
             const auto error = notifications_.takeFailure();
             if (!error.empty()) notificationError_ = error;

@@ -104,7 +104,7 @@ jobs:
             commit = $env:SOURCE_COMMIT
             tag = $env:RELEASE_TAG
             toolchain = 'MSVC x64 Release, static CRT'
-            tested = @('timer_engine', 'state_store', 'controller', 'notifications', 'windows_ui')
+            tested = @('timer_engine', 'state_store', 'controller', 'notifications', 'taskbar_layout', 'windows_ui')
             releaseNotes = $section.Groups[1].Value.Trim()
           } | ConvertTo-Json
           $utf8 = [Text.UTF8Encoding]::new($false)

@@ -3,6 +3,7 @@
 // used: the window stays hidden and HKCU is redirected for this process.
 #include "../src/ui/main_window.cpp"
 #include "pomodoro/taskbar_status_panel.h"
+#include "pomodoro/taskbar_obstacles.h"
 
 #include <iostream>
 #include <optional>
@@ -452,6 +453,110 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
         require(panel.available() && screenBounds(panelWindow).right <= weatherBefore.left &&
                 screenBounds(panelWindow).right > hostClient.left + 420,
                 "Status panel retained a stale foreign-process widget boundary after it exited");
+
+        // The real overlap can occur when a foreign child is taller than the
+        // taskbar and clipped by a full-size Explorer container. Its visible
+        // pixels still occupy space; raw-size heuristics must not discard it.
+        WNDCLASSW workerType{};
+        workerType.lpfnWndProc = DefWindowProcW;
+        workerType.hInstance = GetModuleHandleW(nullptr);
+        workerType.lpszClassName = L"WorkerW";
+        require(RegisterClassW(&workerType) != 0, "Could not register synthetic taskbar container");
+        HWND worker = CreateWindowExW(WS_EX_NOPARENTNOTIFY, workerType.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
+            0, 0, hostClient.right - hostClient.left, hostClient.bottom - hostClient.top,
+            host.window, nullptr, workerType.hInstance, nullptr);
+        require(worker != nullptr, "Could not create synthetic taskbar container");
+        require(SetPropW(worker, syntheticTaskbarProperty,
+            reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetCurrentProcessId()))) != FALSE,
+            "Could not mark synthetic taskbar container");
+        {
+            ForeignTaskbarChild clipped(worker);
+            require(SetWindowPos(clipped.window, nullptr, 550, -8, 210, 64,
+                SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not resize clipped foreign widget");
+            panel.update(L"Timer 00:04", L"Countdown", true);
+            const auto clippedBefore = screenBounds(clipped.window);
+            require(panel.available() && screenBounds(panelWindow).right + 2 <= clippedBefore.left,
+                    "Status panel covered a taller foreign widget clipped by the taskbar");
+            requireSameBounds(clipped.window, clippedBefore, "Status panel changed the clipped widget geometry");
+
+            // No full-width slot means hide, rather than cover the neighbor or
+            // squeeze the timer into an unreadably narrow rectangle.
+            require(SetWindowPos(clipped.window, nullptr, 0, -20, 1200, 90,
+                SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not fill synthetic taskbar with foreign widget");
+            panel.update(L"Timer 00:03", L"Countdown", true);
+            require(!panel.available() && !IsWindowVisible(panelWindow),
+                    "Status panel stayed visible when no collision-free slot existed");
+            requireSameBounds(weather, weatherBefore, "No-room handling moved the weather widget");
+            require(SetWindowPos(clipped.window, nullptr, 550, -8, 210, 64,
+                SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not restore foreign widget");
+            panel.update(L"Timer 00:02", L"Paused", true);
+            require(panel.available() && IsWindowVisible(panelWindow),
+                    "Status panel did not return after free taskbar space became available");
+
+            // Only the part visible through ancestor clients is occupied.
+            require(SetWindowPos(worker, nullptr, 750, 0, 100, hostClient.bottom - hostClient.top,
+                SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not narrow synthetic container");
+            require(SetWindowPos(clipped.window, nullptr, -200, -8, 300, 64,
+                SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not clip foreign widget through container");
+            panel.update(L"Timer 00:01", L"Countdown", true);
+            require(panel.available() && screenBounds(panelWindow).right <= weatherBefore.left &&
+                    screenBounds(panelWindow).right > hostClient.left + 550,
+                    "Invisible pixels outside the ancestor client area displaced the panel");
+        }
+        RemovePropW(worker, syntheticTaskbarProperty);
+        DestroyWindow(worker);
+
+        // Exercise the asynchronous accessibility path against native buttons
+        // in a private task-list window, without reading the real taskbar.
+        WNDCLASSW listType{};
+        listType.lpfnWndProc = DefWindowProcW;
+        listType.hInstance = GetModuleHandleW(nullptr);
+        listType.lpszClassName = L"MSTaskListWClass";
+        require(RegisterClassW(&listType) != 0, "Could not register private task-list class");
+        HWND list = CreateWindowExW(WS_EX_NOPARENTNOTIFY, listType.lpszClassName, L"Private task list",
+            WS_CHILD | WS_VISIBLE, 0, 0, 640, 46, host.window, nullptr, listType.hInstance, nullptr);
+        require(list != nullptr, "Could not create private task list");
+        HWND application = CreateWindowExW(WS_EX_NOPARENTNOTIFY, L"BUTTON", L"Synthetic application",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 300, 46, list, nullptr, listType.hInstance, nullptr);
+        require(application != nullptr, "Could not create private application button");
+        const auto waitForButtons = [&]() {
+            const auto started = GetTickCount64();
+            while (GetTickCount64() - started < 5000) {
+                auto snapshot = collectTaskbarObstacles(host.window, panel.handle(), false);
+                if (snapshot.taskButtonsKnown) return snapshot;
+                MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
+                MSG message{};
+                while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                    require(message.message != WM_QUIT, "Button bounds query unexpectedly quit the test");
+                    TranslateMessage(&message); DispatchMessageW(&message);
+                }
+            }
+            throw std::runtime_error("Could not measure private native application-button bounds");
+        };
+        const auto buttons = waitForButtons();
+        require(std::any_of(buttons.occupied.begin(), buttons.occupied.end(), [](const TaskbarRect& rectangle) {
+            return rectangle.left <= 2 && rectangle.right >= 298;
+        }), "Application button was absent from measured occupied taskbar space");
+        panel.update(L"Timer 00:20", L"Countdown", true);
+        require(panel.available(), "Measured application buttons left a valid gap but status stayed hidden");
+
+        require(SetWindowPos(application, nullptr, 0, 0, 640, 46,
+            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not widen private application button");
+        require(SetWindowPos(list, nullptr, 0, 0, 641, 46,
+            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not invalidate private task-list geometry");
+        (void)waitForButtons();
+        panel.update(L"Timer 00:19", L"Countdown", true);
+        require(!panel.available() && !IsWindowVisible(panel.handle()),
+                "Status covered an application button when no full-size gap remained");
+
+        require(SetWindowPos(application, nullptr, 0, 0, 300, 46,
+            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not narrow private application button");
+        require(SetWindowPos(list, nullptr, 0, 0, 640, 46,
+            SWP_NOZORDER | SWP_NOACTIVATE) != FALSE, "Could not refresh private task-list geometry");
+        (void)waitForButtons();
+        panel.update(L"Timer 00:18", L"Countdown", true);
+        require(panel.available(), "Status did not return after application-button space was freed");
+        DestroyWindow(list);
         DestroyWindow(weather);
 
         panel.update(L"", L"", false);

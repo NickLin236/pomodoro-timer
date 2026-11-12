@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.2 — November 12, 2026
+
+- Choose a full-size taskbar slot using the visible occupied rectangles of neighboring widgets and application buttons, with clearance between windows. Windows clipped by the taskbar are treated as occupied even when their original bounds extend above, below, or beyond it.
+- Replace caption/name-based placement guesses with geometry checks. Validate the panel's actual position before showing it; hide it when there is no safe gap or application-button bounds are unavailable instead of covering another program.
+- Read application-button accessibility bounds asynchronously so a slow external process does not block timer commands. Continue placement checks while status is requested, including paused and no-room states. Keep Explorer and neighboring window geometry unchanged.
+- Add portable collision-layout regressions, including the reported overlap, clipped and oversized windows, insufficient space, scaling, and 12,000 layouts checked against an independent search.
+
+Real Windows 10 placement, accessibility behavior, auto-hide, DPI changes, and coexistence with the user's other programs still require desktop validation. Compilation and portable geometry tests do not establish those runtime results.
+
 ## 1.2.1 — November 11, 2026
 
 - Attempt notification delivery when Windows reports `0x80070490` (Element not found) while reading notification settings. Previously, this lookup failure stopped both test and completion notifications before Windows received a display request. Explicit disabled settings and other lookup errors still report their existing failures.

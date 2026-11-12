@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Pomodoro VERSION 1.2.1 LANGUAGES CXX)
+project(Pomodoro VERSION 1.2.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,8 @@ add_library(pomodoro_core
     src/core/timer_engine.cpp
     src/persistence/state_store.cpp
     src/app/controller.cpp
-    src/app/notifications.cpp)
+    src/app/notifications.cpp
+    src/platform/taskbar_layout.cpp)
 target_include_directories(pomodoro_core PUBLIC include)
 if(WIN32)
     # Apply to every consumer, including tests that include windows.h directly.
@@ -39,10 +40,11 @@ if(WIN32)
     add_executable(Pomodoro WIN32 src/ui/main_window.cpp
         src/platform/windows_shell.cpp src/platform/clock.cpp
         src/platform/windows_notifications.cpp
+        src/platform/taskbar_obstacles.cpp
         src/platform/taskbar_status_panel.cpp)
     pomodoro_embed_windows_resources(Pomodoro)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
-        uuid advapi32 user32 gdi32)
+        uuid advapi32 user32 gdi32 oleacc oleaut32)
     target_compile_definitions(Pomodoro PRIVATE UNICODE _UNICODE
         _WIN32_WINNT=0x0A00 WINVER=0x0A00)
     if(MSVC)
@@ -65,7 +67,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(suite IN ITEMS timer_engine state_store controller notifications)
+    foreach(suite IN ITEMS timer_engine state_store controller notifications taskbar_layout)
         add_executable(${suite}_tests tests/${suite}_tests.cpp)
         target_link_libraries(${suite}_tests PRIVATE pomodoro_core)
         add_test(NAME ${suite} COMMAND ${suite}_tests)
@@ -75,10 +77,11 @@ if(BUILD_TESTING)
         add_executable(windows_ui_tests tests/windows_ui_tests.cpp
             src/platform/windows_shell.cpp src/platform/clock.cpp
             src/platform/windows_notifications.cpp
+            src/platform/taskbar_obstacles.cpp
             src/platform/taskbar_status_panel.cpp)
         pomodoro_embed_windows_resources(windows_ui_tests)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32
-            ole32 uuid advapi32 user32 gdi32)
+            ole32 uuid advapi32 user32 gdi32 oleacc oleaut32)
         target_compile_definitions(windows_ui_tests PRIVATE UNICODE _UNICODE
             _WIN32_WINNT=0x0A00 WINVER=0x0A00)
         if(MSVC)

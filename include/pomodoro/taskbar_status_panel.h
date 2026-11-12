@@ -10,11 +10,11 @@
 
 namespace pomodoro {
 
-// A small text window drawn over existing space in a horizontal Windows taskbar
-// beside the visible right-side widget group (Traffic Monitor, weather,
-// toolbars and the notification area). Cross-process text requests are bounded.
-// It never resizes Explorer or Traffic Monitor and does not reserve a taskbar
-// band. Leave a gap beside Traffic Monitor when the taskbar has many buttons.
+inline constexpr UINT taskbarLayoutChangedMessage = WM_APP + 92;
+
+// A full-size panel in measured free taskbar space. Visible widget and button
+// bounds are obstacles; if no safe gap can be measured, the panel stays hidden.
+// It never moves or resizes Explorer or neighboring applications.
 class TaskbarStatusPanel final {
 public:
     // The optional explicit host lets native tests exercise placement without
@@ -36,7 +36,7 @@ public:
 private:
     static LRESULT CALLBACK windowProcedure(HWND, UINT, WPARAM, LPARAM);
     bool create(HWND host);
-    bool locate(HWND& host, RECT& hostBounds, RECT& anchorBounds);
+    bool locate(HWND& host, RECT& hostBounds);
     void paint();
     void updateFont(UINT dpi, int height);
     void updateColors(HWND host, const RECT& bounds);
@@ -54,6 +54,8 @@ private:
     bool requestedVisible_ = false;
     bool layoutAvailable_ = false;
     bool positioning_ = false;
+    bool layoutTimer_ = false;
+    ULONGLONG lastLayoutCheck_ = 0;
     std::wstring firstLine_;
     std::wstring secondLine_;
     std::wstring error_;

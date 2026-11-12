@@ -41,10 +41,15 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 - [ ] Turn Show timer status in taskbar off/on, save, relaunch; preference is retained. Existing 1.0 settings default it on.
 - [ ] Traffic Monitor running, stopped, moved/resized, or restarted: the Pomodoro panel remains beside it and does not cover its readings.
 - [ ] With Windows weather/News and interests and other taskbar widgets visible, the panel sits left of the whole compact widget group and does not cover weather text, Traffic Monitor readings, toolbars, or notification icons. Move weather before/after Traffic Monitor and repeat with Traffic Monitor hidden or restarted.
-- [ ] Test with a crowded taskbar: confirm the documented overlay limitation, leave sufficient space or disable the panel, and ensure Traffic Monitor readings remain uncovered.
+- [ ] Reproduce the reported overlap with a widget whose original window extends above/below the taskbar or is clipped by an Explorer container. Its visible portion remains uncovered, including with an empty caption and an unrelated executable name.
+- [ ] Test several adjacent or overlapping widget bounds. The full panel moves left of every blocker and keeps clearance without moving or resizing neighbors.
+- [ ] Test with a crowded taskbar and application buttons occupying the remaining gap. The panel hides with a useful status message instead of covering widgets or buttons; make room and confirm it returns.
+- [ ] Delay or deny accessibility reads for application-button bounds. Timer commands stay responsive and the panel stays hidden while a safe slot cannot be confirmed. Check that it can return after a completed read while the timer is paused.
+- [ ] Maximize an ordinary application behind the taskbar; its invisible resize border does not incorrectly block the status panel.
+- [ ] Pause a timer, then move or resize another widget across the available slot. Placement continues to update, hides if blocked, and returns when room is available without changing the paused remaining time.
 - [ ] Taskbar auto-hide, resizing, screen resolution change, and 100/125/150/200% DPI: status follows the supported taskbar location.
 - [ ] Vertical/unsupported taskbars fail gracefully with the documented fallback; no invisible window traps access to the app.
-- [ ] On Windows 11, record whether descendant anchor discovery finds a usable horizontal layout and whether the panel is visible above sibling windows. Do not treat a successful build as placement validation.
+- [ ] On Windows 11, record whether occupied-window and application-button discovery finds a usable horizontal layout and whether the panel is visible above sibling windows. Do not treat a successful build as placement validation.
 - [ ] Main-window indicator source switching, paused state, and hidden/visible taskbar labels.
 - [ ] Sign-in startup on/off without elevation; launching background mode works after sign-in.
 - [ ] Suspend/resume, hibernate, reboot, time-zone/DST changes, manual forward/backward clock changes.
@@ -81,5 +86,5 @@ The target is at most 40 MiB minimized private bytes. It remains provisional unt
 - [ ] Record launch baseline and five minutes minimized; private bytes, working set, normalized CPU, threads, GDI/USER and total handles.
 - [ ] Repeat with both timers running and minimized for at least 30 minutes.
 - [ ] Repeat 100 start/pause/reset/minimize/restore operations and check memory/handles settle.
-- [ ] Verify no periodic callbacks while idle/paused/completed and no per-second writes or network activity.
+- [ ] Verify countdown callbacks stop when neither timer is running and no notification retry is pending. The separate placement monitor continues once per second while taskbar status is requested, including paused/no-room states, and stops when status is inactive or disabled. Neither display path writes state every second or performs network activity.
 - [ ] Record executable/package size separately from memory and retain CSV results in the test report.
