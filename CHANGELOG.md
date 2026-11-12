@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 — November 11, 2026
+
+- Attempt notification delivery when Windows reports `0x80070490` (Element not found) while reading notification settings. Previously, this lookup failure stopped both test and completion notifications before Windows received a display request. Explicit disabled settings and other lookup errors still report their existing failures.
+- Place taskbar status to the left of the visible Traffic Monitor/weather/toolbar/notification-area widget group instead of drawing over the weather area. Detect Traffic Monitor even when its cross-process cached caption is unavailable, without resizing neighboring windows.
+- Add regressions for the missing-settings notification path and taskbar widget placement. Windows desktop validation remains separate from portable tests and compilation.
+
 ## 1.2.0 — November 11, 2026
 
 - Show either active Pomodoro or countdown status in the taskbar, using the preferred source when both timers are active and automatically falling back to the active timer.

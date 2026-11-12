@@ -1,4 +1,5 @@
 #include "pomodoro/windows_notifications.h"
+#include "pomodoro/notification_request.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -423,34 +424,40 @@ bool WindowsNotifications::show(const std::wstring& xml, const std::wstring& tag
     ComPtr<Notifier> notifier;
     if (SUCCEEDED(status)) status = manager->CreateToastNotifierWithId(identity.get(), notifier.put());
     if (FAILED(status)) return impl_->fail(L"Could not create this application's notifier", status);
-    int setting = 0;
-    status = notifier->get_Setting(&setting);
-    if (FAILED(status)) return impl_->fail(L"Could not read Windows notification settings", status);
-    if (setting != 0) {
-        switch (setting) {
+    const wchar_t* sendOperation = L"Could not create the Windows notification";
+    const auto result = requestNotification(
+        [&notifier](int& setting) { return static_cast<std::int32_t>(notifier->get_Setting(&setting)); },
+        [&]() -> std::int32_t {
+            ComPtr<IInspectable> toast;
+            HRESULT sendStatus = createToast(runtime, xml, tag, toast);
+            if (FAILED(sendStatus)) return static_cast<std::int32_t>(sendStatus);
+            sendOperation = L"Could not monitor Windows notification delivery";
+            auto subscription = std::make_unique<Subscription>(impl_->failures);
+            sendStatus = subscription->connect(toast.get());
+            if (FAILED(sendStatus)) return static_cast<std::int32_t>(sendStatus);
+            // Retire the old delegate before sending its replacement; delayed
+            // callbacks from cleared/replaced notices cannot replace its error.
+            impl_->subscriptions.erase(tag);
+            impl_->subscriptions.emplace(tag, std::move(subscription));
+            sendOperation = L"Windows could not accept the notification";
+            sendStatus = notifier->Show(toast.get());
+            if (FAILED(sendStatus)) impl_->subscriptions.erase(tag);
+            return static_cast<std::int32_t>(sendStatus);
+        });
+    if (result.state == NotificationRequestState::SettingsReadFailed)
+        return impl_->fail(L"Could not read Windows notification settings", static_cast<HRESULT>(result.status));
+    if (result.state == NotificationRequestState::Blocked) {
+        switch (result.setting) {
         case 1: impl_->error = L"Notifications for Pomodoro are disabled in Windows Settings. Enable Pomodoro under System > Notifications."; break;
         case 2: impl_->error = L"Windows notifications are disabled for this user. Enable notifications in Windows Settings > System > Notifications."; break;
         case 3: impl_->error = L"A Windows policy has disabled notifications. Contact your administrator."; break;
         case 4: impl_->error = L"This Windows notification manifest setting does not permit notifications."; break;
-        default: impl_->error = L"Windows reports an unsupported notification setting: " + std::to_wstring(setting); break;
+        default: impl_->error = L"Windows reports an unsupported notification setting: " + std::to_wstring(result.setting); break;
         }
         return false;
     }
-    ComPtr<IInspectable> toast;
-    status = createToast(runtime, xml, tag, toast);
-    if (FAILED(status)) return impl_->fail(L"Could not create the Windows notification", status);
-    auto subscription = std::make_unique<Subscription>(impl_->failures);
-    status = subscription->connect(toast.get());
-    if (FAILED(status)) return impl_->fail(L"Could not monitor Windows notification delivery", status);
-    // Retire the old delegate before sending its replacement; delayed callbacks
-    // from a cleared/replaced notification cannot overwrite the current error.
-    impl_->subscriptions.erase(tag);
-    impl_->subscriptions.emplace(tag, std::move(subscription));
-    status = notifier->Show(toast.get());
-    if (FAILED(status)) {
-        impl_->subscriptions.erase(tag);
-        return impl_->fail(L"Windows could not accept the notification", status);
-    }
+    if (result.state == NotificationRequestState::SendFailed)
+        return impl_->fail(sendOperation, static_cast<HRESULT>(result.status));
     return true;
 }
 

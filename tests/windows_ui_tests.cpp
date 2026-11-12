@@ -102,6 +102,8 @@ private:
 };
 
 constexpr UINT syntheticPanelCallback = WM_APP + 80;
+constexpr wchar_t syntheticTaskbarProperty[] = L"PomodoroNative.SyntheticTaskbar";
+constexpr wchar_t foreignTaskbarClass[] = L"PomodoroNative.ForeignTaskbarTest";
 
 struct PanelCallbacks {
     int open = 0;
@@ -133,6 +135,9 @@ public:
             L"STATIC", L"Pomodoro synthetic taskbar", WS_POPUP | WS_BORDER,
             20, 20, 1000, 48, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
         require(window != nullptr, "Could not create synthetic taskbar host");
+        require(SetPropW(window, syntheticTaskbarProperty,
+            reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetCurrentProcessId()))) != FALSE,
+            "Could not mark synthetic taskbar host");
         taskList = CreateWindowExW(0, L"STATIC", L"Task-list placeholder", WS_CHILD | WS_VISIBLE,
             0, 0, 1000, 48, window, nullptr, GetModuleHandleW(nullptr), nullptr);
         monitorContainer = CreateWindowExW(0, L"STATIC", L"Monitor container", WS_CHILD | WS_VISIBLE,
@@ -172,6 +177,120 @@ public:
         while (PeekMessageW(&message, window, syntheticPanelCallback, syntheticPanelCallback, PM_REMOVE))
             DispatchMessageW(&message);
     }
+};
+
+LRESULT CALLBACK foreignTaskbarProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_GETTEXT) {
+        constexpr wchar_t caption[] = L"TrafficMonitorTaskbarWindow";
+        if (!wParam || !lParam) return 0;
+        const auto length = (std::min)(static_cast<std::size_t>(wParam) - 1, std::size(caption) - 1);
+        auto* result = reinterpret_cast<wchar_t*>(lParam);
+        std::copy_n(caption, length, result);
+        result[length] = L'\0';
+        return static_cast<LRESULT>(length);
+    }
+    if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+int foreignTaskbarHelper(int count, char** arguments) {
+    if (count != 4) return 2;
+    const HWND parent = reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(arguments[2])));
+    DWORD parentProcess = 0;
+    GetWindowThreadProcessId(parent, &parentProcess);
+    if (!parentProcess || GetPropW(parent, syntheticTaskbarProperty) !=
+            reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(parentProcess))) return 3;
+    const std::string narrowEvent(arguments[3]);
+    const std::wstring eventName(narrowEvent.begin(), narrowEvent.end());
+    const auto prefix = L"Local\\PomodoroNative.ForeignTaskbarTest." + std::to_wstring(parentProcess) + L".";
+    if (eventName.compare(0, prefix.size(), prefix) != 0) return 4;
+    UniqueHandle ready(OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName.c_str()));
+    if (!ready) return 5;
+    WNDCLASSW type{};
+    type.hInstance = GetModuleHandleW(nullptr);
+    type.lpfnWndProc = foreignTaskbarProcedure;
+    type.lpszClassName = foreignTaskbarClass;
+    if (!RegisterClassW(&type)) return 6;
+    // Leave the system caption cache empty. A foreign GetWindowText call sees
+    // no caption, while a bounded WM_GETTEXT request reaches the custom text.
+    HWND child = CreateWindowExW(WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE,
+        foreignTaskbarClass, L"", WS_CHILD | WS_VISIBLE,
+        420, 0, 150, 46, parent, nullptr, type.hInstance, nullptr);
+    if (!child) return 7;
+    SetEvent(ready.get());
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message); DispatchMessageW(&message);
+    }
+    return 0;
+}
+
+DWORD waitForTestObject(HANDLE object, DWORD timeout) {
+    const auto started = GetTickCount64();
+    for (;;) {
+        const auto elapsed = GetTickCount64() - started;
+        if (elapsed >= timeout) return WAIT_TIMEOUT;
+        const DWORD remaining = timeout - static_cast<DWORD>(elapsed);
+        const DWORD result = MsgWaitForMultipleObjects(1, &object, FALSE, remaining, QS_ALLINPUT);
+        if (result != WAIT_OBJECT_0 + 1) return result;
+        // Cross-process child creation/destruction can synchronously query its
+        // parent. Keep the test's UI thread responsive during bounded waits.
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                PostQuitMessage(static_cast<int>(message.wParam));
+                return WAIT_FAILED;
+            }
+            TranslateMessage(&message); DispatchMessageW(&message);
+        }
+    }
+}
+
+class ForeignTaskbarChild {
+public:
+    explicit ForeignTaskbarChild(HWND host) : host_(host) {
+        static unsigned serial = 0;
+        const auto name = L"Local\\PomodoroNative.ForeignTaskbarTest." + std::to_wstring(GetCurrentProcessId()) +
+            L"." + std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(++serial);
+        UniqueHandle ready(CreateEventW(nullptr, TRUE, FALSE, name.c_str()));
+        require(ready != nullptr, "Could not create foreign taskbar readiness event");
+        std::vector<wchar_t> executable(32768);
+        const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+        require(length != 0 && length < executable.size(), "Could not locate foreign taskbar test executable");
+        auto command = L"\"" + std::wstring(executable.data(), length) + L"\" --synthetic-taskbar-child " +
+            std::to_wstring(reinterpret_cast<UINT_PTR>(host_)) + L" " + name;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        require(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+            nullptr, nullptr, &startup, &process) != FALSE, "Could not launch foreign taskbar test process");
+        process_.reset(process.hProcess);
+        CloseHandle(process.hThread);
+        if (waitForTestObject(ready.get(), 5000) != WAIT_OBJECT_0) {
+            stop();
+            throw std::runtime_error("Foreign taskbar test process did not become ready");
+        }
+        window = FindWindowExW(host_, nullptr, foreignTaskbarClass, nullptr);
+        if (!window) {
+            stop();
+            throw std::runtime_error("Could not find foreign synthetic taskbar child");
+        }
+    }
+    ~ForeignTaskbarChild() { stop(); }
+    HWND window = nullptr;
+private:
+    void stop() {
+        if (!process_) return;
+        if (!window) window = FindWindowExW(host_, nullptr, foreignTaskbarClass, nullptr);
+        if (window) PostMessageW(window, WM_CLOSE, 0, 0);
+        if (waitForTestObject(process_.get(), 2000) != WAIT_OBJECT_0) {
+            // This handle belongs only to the helper started by this fixture.
+            TerminateProcess(process_.get(), 1);
+            WaitForSingleObject(process_.get(), 1000);
+        }
+        process_.reset();
+    }
+    HWND host_;
+    UniqueHandle process_;
 };
 
 RECT screenBounds(HWND window) {
@@ -287,6 +406,54 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
         require(panel.available() && screenBounds(panelWindow).right <= monitorBefore.left,
                 "An off-taskbar Traffic Monitor prevented a valid descendant anchor from being used");
         DestroyWindow(staleMonitor);
+
+        // Reproduce the screenshot's adjacent weather widget. No caption or
+        // hard-coded weather-class rule is needed to keep compact widgets clear.
+        WNDCLASSW weatherType{};
+        weatherType.lpfnWndProc = DefWindowProcW;
+        weatherType.hInstance = GetModuleHandleW(nullptr);
+        weatherType.lpszClassName = L"DynamicContent1";
+        require(RegisterClassW(&weatherType) != 0, "Could not register synthetic weather widget");
+        HWND weather = CreateWindowExW(0, weatherType.lpszClassName, L"15 C Mostly cloudy", WS_CHILD | WS_VISIBLE,
+            650, 0, 140, 46, host.window, nullptr, weatherType.hInstance, nullptr);
+        require(weather != nullptr, "Could not create synthetic weather widget");
+        const auto weatherBefore = screenBounds(weather);
+        panel.update(L"Focus 24:57", L"Cycle 2 / 4", true);
+        require(panel.available() && screenBounds(panelWindow).right <= weatherBefore.left,
+                "Status panel covered a weather widget to the left of Traffic Monitor");
+        requireSameBounds(weather, weatherBefore, "Status panel resized or moved the weather widget");
+        ShowWindow(host.monitorContainer, SW_HIDE);
+        panel.update(L"Focus 24:57", L"Cycle 2 / 4", true);
+        require(panel.available() && screenBounds(panelWindow).right <= weatherBefore.left,
+                "Tray fallback covered weather when Traffic Monitor was unavailable");
+        ShowWindow(host.monitorContainer, SW_SHOWNOACTIVATE);
+
+        // Traffic Monitor and weather may trade places after Explorer lays out
+        // its widgets. Placement follows the left edge of the whole group.
+        SetWindowPos(host.monitorContainer, nullptr, 760, 0, 160, 46, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(weather, nullptr, 925, 0, 30, 46, SWP_NOZORDER | SWP_NOACTIVATE);
+        panel.update(L"Focus 24:56", L"Cycle 2 / 4", true);
+        require(panel.available() && screenBounds(panelWindow).right <= screenBounds(host.trafficMonitor).left,
+                "Reordered widgets moved status over Traffic Monitor");
+        SetWindowPos(host.monitorContainer, nullptr, 800, 0, 160, 46, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(weather, nullptr, 650, 0, 140, 46, SWP_NOZORDER | SWP_NOACTIVATE);
+        {
+            ForeignTaskbarChild foreign(host.window);
+            wchar_t cachedCaption[128]{};
+            require(GetWindowTextW(foreign.window, cachedCaption, static_cast<int>(std::size(cachedCaption))) == 0,
+                    "Foreign taskbar fixture unexpectedly populated its system caption cache");
+            const auto foreignBounds = screenBounds(foreign.window);
+            panel.update(L"Focus 24:55", L"Cycle 2 / 4", true);
+            require(panel.available() && screenBounds(panelWindow).right <= foreignBounds.left,
+                    "Status panel ignored a visible foreign widget with an empty caption cache");
+            requireSameBounds(foreign.window, foreignBounds, "Status panel moved the foreign widget");
+        }
+        panel.update(L"Focus 24:54", L"Cycle 2 / 4", true);
+        require(panel.available() && screenBounds(panelWindow).right <= weatherBefore.left &&
+                screenBounds(panelWindow).right > hostClient.left + 420,
+                "Status panel retained a stale foreign-process widget boundary after it exited");
+        DestroyWindow(weather);
+
         panel.update(L"", L"", false);
         require(!IsWindowVisible(panel.handle()), "Disabled or idle status panel remained visible");
         panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
@@ -442,8 +609,10 @@ void settingsAndCloseBehavior() {
 }
 } // namespace
 
-int main() {
+int main(int count, char** arguments) {
     try {
+        if (count > 1 && std::string(arguments[1]) == "--synthetic-taskbar-child")
+            return foreignTaskbarHelper(count, arguments);
         ComLifetime com;
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};

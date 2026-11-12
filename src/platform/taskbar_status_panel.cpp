@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <map>
+#include <vector>
 #include <utility>
 
 namespace pomodoro {
@@ -48,32 +50,113 @@ bool intersects(const RECT& first, const RECT& second) {
 struct AnchorSearch {
     HWND host;
     RECT clientBounds;
-    HWND trafficMonitor = nullptr;
-    HWND notificationArea = nullptr;
+    DWORD hostProcess = 0;
+    bool found = false;
+    RECT boundary{};
+    std::map<DWORD, bool> trafficProcesses{};
+    unsigned textRequests = 0;
 };
 
-BOOL CALLBACK findTaskbarAnchor(HWND window, LPARAM result) {
-    auto& search = *reinterpret_cast<AnchorSearch*>(result);
-    // Explorer can retain hidden children while rebuilding its taskbar. Ignore
-    // those without rejecting a temporarily hidden/auto-hidden host itself.
-    for (HWND current = window; current && current != search.host; current = GetParent(current)) {
-        if (!(GetWindowLongPtrW(current, GWL_STYLE) & WS_VISIBLE)) return TRUE;
+bool isContainer(const std::wstring& name) {
+    return name == L"ReBarWindow32" || name == L"WorkerW" ||
+        name == L"MSTaskSwWClass" || name == L"MSTaskListWClass" ||
+        name == L"Windows.UI.Composition.DesktopWindowContentBridge";
+}
+
+bool isTaskListDescendant(HWND window, HWND host) {
+    for (HWND parent = window; parent && parent != host; parent = GetParent(parent)) {
+        wchar_t name[128]{};
+        GetClassNameW(parent, name, static_cast<int>(std::size(name)));
+        if (std::wstring(name) == L"MSTaskSwWClass" || std::wstring(name) == L"MSTaskListWClass")
+            return true;
     }
+    return false;
+}
+
+bool isTrafficMonitorProcess(DWORD process, AnchorSearch& search) {
+    if (!process || process == search.hostProcess || process == GetCurrentProcessId()) return false;
+    const auto cached = search.trafficProcesses.find(process);
+    if (cached != search.trafficProcesses.end()) return cached->second;
+    bool trafficMonitor = false;
+    HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process);
+    if (handle) {
+        std::vector<wchar_t> path(32768);
+        DWORD length = static_cast<DWORD>(path.size());
+        if (QueryFullProcessImageNameW(handle, 0, path.data(), &length)) {
+            const std::wstring image(path.data(), length);
+            const auto slash = image.find_last_of(L"\\/");
+            const std::wstring name = image.substr(slash == std::wstring::npos ? 0 : slash + 1);
+            trafficMonitor = name.size() >= 18 &&
+                CompareStringOrdinal(name.c_str(), 14, L"TrafficMonitor", 14, TRUE) == CSTR_EQUAL &&
+                CompareStringOrdinal(name.c_str() + name.size() - 4, 4, L".exe", 4, TRUE) == CSTR_EQUAL;
+        }
+        CloseHandle(handle);
+    }
+    search.trafficProcesses.emplace(process, trafficMonitor);
+    return trafficMonitor;
+}
+
+void includeBoundary(AnchorSearch& search, const RECT& bounds) {
+    if (!search.found || bounds.left < search.boundary.left) search.boundary = bounds;
+    search.found = true;
+}
+
+BOOL examineTaskbarWindow(HWND window, AnchorSearch& search, bool descendant) {
+    if (descendant) {
+        // Explorer can retain hidden children while rebuilding its taskbar.
+        for (HWND current = window; current && current != search.host; current = GetParent(current)) {
+            if (!(GetWindowLongPtrW(current, GWL_STYLE) & WS_VISIBLE)) return TRUE;
+        }
+    } else if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE)) return TRUE;
     RECT bounds{};
     if (!GetWindowRect(window, &bounds)) return TRUE;
     MapWindowPoints(HWND_DESKTOP, search.host, reinterpret_cast<POINT*>(&bounds), 2);
     if (bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
         !intersects(search.clientBounds, bounds)) return TRUE;
+    wchar_t classBuffer[128]{};
+    GetClassNameW(window, classBuffer, static_cast<int>(std::size(classBuffer)));
+    const std::wstring className(classBuffer);
+    if (className == panelClass || className == L"tooltips_class32" || isContainer(className)) return TRUE;
+
+    const LONG hostWidth = search.clientBounds.right - search.clientBounds.left;
+    const LONG hostHeight = search.clientBounds.bottom - search.clientBounds.top;
+    const bool compact = bounds.right - bounds.left <= hostWidth / 2 &&
+        bounds.bottom - bounds.top <= hostHeight * 2 &&
+        bounds.top >= search.clientBounds.top - 2 && bounds.bottom <= search.clientBounds.bottom + 2;
+    if (!compact && className != L"TrayNotifyWnd") return TRUE;
+
     wchar_t title[128]{};
     GetWindowTextW(window, title, static_cast<int>(std::size(title)));
-    if (std::wstring(title) == trafficMonitorTitle) {
-        search.trafficMonitor = window;
-        return FALSE;
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    bool trafficMonitor = std::wstring(title) == trafficMonitorTitle || className == trafficMonitorTitle;
+    if (!trafficMonitor && compact && process != search.hostProcess && process != GetCurrentProcessId()) {
+        // GetWindowText does not reliably retrieve custom text from another
+        // process's child controls. A bounded request also handles MFC dialogs
+        // whose caption cache is empty. Never let a hung widget block a tick.
+        DWORD_PTR copied = 0;
+        if (search.textRequests++ < 3 && SendMessageTimeoutW(window, WM_GETTEXT, std::size(title), reinterpret_cast<LPARAM>(title),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &copied))
+            trafficMonitor = std::wstring(title) == trafficMonitorTitle;
+        if (!trafficMonitor) trafficMonitor = isTrafficMonitorProcess(process, search);
     }
-    wchar_t className[128]{};
-    GetClassNameW(window, className, static_cast<int>(std::size(className)));
-    if (std::wstring(className) == L"TrayNotifyWnd") search.notificationArea = window;
+    if (trafficMonitor) includeBoundary(search, bounds);
+    // News and interests, taskbar toolbars and other compact widgets can sit
+    // between Traffic Monitor and the tray, or to its left. Use the left edge
+    // of the whole right-side group, not just the tray's immediate neighbour.
+    // Task-list containers span unused button space, so they are not widgets.
+    if (descendant && compact && bounds.left >= search.clientBounds.left + hostWidth / 2 &&
+        !isTaskListDescendant(window, search.host))
+        includeBoundary(search, bounds);
+    if (className == L"TrayNotifyWnd") includeBoundary(search, bounds);
     return TRUE;
+}
+
+BOOL CALLBACK findTaskbarAnchor(HWND window, LPARAM result) {
+    return examineTaskbarWindow(window, *reinterpret_cast<AnchorSearch*>(result), true);
+}
+BOOL CALLBACK findFloatingTrafficMonitor(HWND window, LPARAM result) {
+    return examineTaskbarWindow(window, *reinterpret_cast<AnchorSearch*>(result), false);
 }
 } // namespace
 
@@ -134,13 +217,16 @@ bool TaskbarStatusPanel::locate(HWND& host, RECT& hostBounds, RECT& anchorBounds
     // taskbar replacements. Placement needs only a visible anchor, so do not
     // reject a working Traffic Monitor based on unrelated task-list classes.
     AnchorSearch search{host, hostBounds};
+    GetWindowThreadProcessId(host, &search.hostProcess);
     EnumChildWindows(host, findTaskbarAnchor, reinterpret_cast<LPARAM>(&search));
-    const HWND anchor = search.trafficMonitor ? search.trafficMonitor : search.notificationArea;
-    if (!anchor || !GetWindowRect(anchor, &anchorBounds)) {
+    // Traffic Monitor may fall back to a tiny top-level taskbar-aligned window
+    // when SetParent fails. Its source explicitly supports that configuration.
+    if (!explicitHost_) EnumWindows(findFloatingTrafficMonitor, reinterpret_cast<LPARAM>(&search));
+    if (!search.found) {
         fail(L"Could not find Traffic Monitor or the taskbar notification area for the status panel.");
         return false;
     }
-    MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&anchorBounds), 2);
+    anchorBounds = search.boundary;
     return true;
 }
 

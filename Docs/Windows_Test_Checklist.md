@@ -40,6 +40,7 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 - [ ] Pause/resume, focus/break transition, reset, and final break completion update/hide the text panel correctly. Paused status remains visible; the panel hides when neither timer is active.
 - [ ] Turn Show timer status in taskbar off/on, save, relaunch; preference is retained. Existing 1.0 settings default it on.
 - [ ] Traffic Monitor running, stopped, moved/resized, or restarted: the Pomodoro panel remains beside it and does not cover its readings.
+- [ ] With Windows weather/News and interests and other taskbar widgets visible, the panel sits left of the whole compact widget group and does not cover weather text, Traffic Monitor readings, toolbars, or notification icons. Move weather before/after Traffic Monitor and repeat with Traffic Monitor hidden or restarted.
 - [ ] Test with a crowded taskbar: confirm the documented overlay limitation, leave sufficient space or disable the panel, and ensure Traffic Monitor readings remain uncovered.
 - [ ] Taskbar auto-hide, resizing, screen resolution change, and 100/125/150/200% DPI: status follows the supported taskbar location.
 - [ ] Vertical/unsupported taskbars fail gracefully with the documented fallback; no invisible window traps access to the app.
@@ -62,6 +63,7 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 - [ ] Leave an old notification, reset/start a new session, then click the old Stop action. The new session continues. Repeat after closing and reopening the app.
 - [ ] Click the notification body; the existing instance opens the related timer page. After Exit, the notification action launches only one instance and resolves its target session correctly.
 - [ ] New phase messages replace the same timer's old entry; Pomodoro and countdown entries do not replace each other.
+- [ ] After first launch/registration, test notifications and a short countdown. A `0x80070490` settings lookup must still permit a display request; record the actual request/delivery outcome separately from settings availability.
 - [ ] Disable Windows notifications for the app and test again. A useful policy/delivery error is shown and in-app completion status remains available. Re-enable notifications and retry successfully.
 - [ ] Test Focus Assist/Do not disturb and Windows sound settings; record suppressed banners/sounds separately from rejected requests.
 - [ ] Force a synchronous delivery failure, then restore delivery before the two five-second retries expire. No duplicate/stale notification is left behind; resetting/starting another session cancels its old retries.

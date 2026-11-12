@@ -1,4 +1,5 @@
 #include "pomodoro/notifications.h"
+#include "pomodoro/notification_request.h"
 
 #include <algorithm>
 #include <iostream>
@@ -259,6 +260,43 @@ void resetAndNewSessionsDiscardOldQueuedActions() {
     CHECK(count == 2 && !outbox.pending());
 }
 
+void missingWindowsSettingsStillAttemptsDeliveryWithoutBypassingPolicy() {
+    constexpr std::int32_t notFound = -2147023728; // HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
+    constexpr std::int32_t accessDenied = -2147024891;
+    constexpr std::int32_t serviceFailure = -2147467259;
+    int sends = 0;
+    bool windowsHasRecord = false;
+    const auto query = [&](int& setting) -> std::int32_t {
+        setting = 3; // Failed lookups must not accidentally use this output.
+        if (!windowsHasRecord) return notFound;
+        setting = 0;
+        return 0;
+    };
+    const auto send = [&]() -> std::int32_t { ++sends; windowsHasRecord = true; return 0; };
+
+    // The reported failure used to return before Send. An unavailable advisory
+    // lookup must not suppress either the first or later delivery attempts.
+    CHECK(requestNotification(query, send).state == NotificationRequestState::Accepted);
+    CHECK(windowsHasRecord && sends == 1);
+    CHECK(requestNotification(query, send).state == NotificationRequestState::Accepted);
+    CHECK(sends == 2);
+    for (int disabled : {1, 2, 3, 4, 99}) {
+        const auto blocked = requestNotification([disabled](int& setting) -> std::int32_t {
+            setting = disabled; return 0;
+        }, send);
+        CHECK(blocked.state == NotificationRequestState::Blocked && blocked.setting == disabled);
+        CHECK(sends == 2);
+    }
+    const auto denied = requestNotification([](int&) { return accessDenied; }, send);
+    CHECK(denied.state == NotificationRequestState::SettingsReadFailed && denied.status == accessDenied);
+    CHECK(sends == 2);
+    const auto actualFailure = requestNotification([](int&) { return notFound; }, [&]() -> std::int32_t {
+        ++sends; return serviceFailure;
+    });
+    CHECK(actualFailure.state == NotificationRequestState::SendFailed && actualFailure.status == serviceFailure);
+    CHECK(sends == 3);
+}
+
 } // namespace
 
 int main() {
@@ -271,7 +309,8 @@ int main() {
         latestNoticeReplacesOnlyItsOwnTimer();
         rejectedRequestsRetryAtFiveAndTenSecondsThenStop();
         resetAndNewSessionsDiscardOldQueuedActions();
-        std::cout << "8 notification scenarios passed\n";
+        missingWindowsSettingsStillAttemptsDeliveryWithoutBypassingPolicy();
+        std::cout << "9 notification scenarios passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
