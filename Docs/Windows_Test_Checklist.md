@@ -5,6 +5,7 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 ## Build and offline installation
 
 - [ ] Configure/build/test with the documented MSVC x64 presets.
+- [ ] Exit every previous running copy before updating. Open the new executable and verify **Pomodoro 1.2.3** in Settings; a second launch must not leave an old running version mistaken for the new build.
 - [ ] Create ZIP, copy to a clean Windows 10 x64 machine with networking disabled, extract, run.
 - [ ] Install per-user without elevation; launch using the Start Menu shortcut.
 - [ ] Run from a non-ASCII user/profile path and a path containing spaces.
@@ -44,6 +45,11 @@ Record Windows edition/build, DPI/monitor layout, compiler/SDK version, executab
 - [ ] Reproduce the reported overlap with a widget whose original window extends above/below the taskbar or is clipped by an Explorer container. Its visible portion remains uncovered, including with an empty caption and an unrelated executable name.
 - [ ] Test several adjacent or overlapping widget bounds. The full panel moves left of every blocker and keeps clearance without moving or resizing neighbors.
 - [ ] Test with a crowded taskbar and application buttons occupying the remaining gap. The panel hides with a useful status message instead of covering widgets or buttons; make room and confirm it returns.
+- [ ] Exercise valid simple MSAA child IDs that return `S_FALSE`/no child object, full child objects with their own properties, and text/graphic container roots with real button descendants. Usable bounds remain usable and a full background rectangle is not mistaken for a button.
+- [ ] Test partially clipped accessibility bounds at the physical taskbar edges and per-monitor-aware hosts. Coordinate conversion must not hide an otherwise usable panel.
+- [ ] Use a foreign-process full-width WorkerW/background container with small visible children. Empty background space stays available; actual child controls remain uncovered.
+- [ ] Include a left-side foreign Search/Start-like control and right-side widgets with room between them. If the preferred leftward search fails, a full-strip search finds the measured free middle gap.
+- [ ] While status is missing, choose **Copy taskbar diagnostics**, paste into a text editor, and verify the report identifies the running version/path, preference/state, placement reason and rectangles. Confirm no other window titles/contents are included and no network request occurs. Verify a successful copy is reported and clipboard failures are visible.
 - [ ] Delay or deny accessibility reads for application-button bounds. Timer commands stay responsive and the panel stays hidden while a safe slot cannot be confirmed. Check that it can return after a completed read while the timer is paused.
 - [ ] Maximize an ordinary application behind the taskbar; its invisible resize border does not incorrectly block the status panel.
 - [ ] Pause a timer, then move or resize another widget across the available slot. Placement continues to update, hides if blocked, and returns when room is available without changing the paused remaining time.

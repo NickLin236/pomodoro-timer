@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3 — November 17, 2026
+
+- Correct taskbar accessibility traversal for valid simple elements and full child objects. Inspect container children before treating text or graphic roles as occupied pixels, and clip accessibility bounds before converting DPI coordinates.
+- Accept completed accessibility measurements from slow providers instead of discarding them after 500 ms. Traversal remains capped, only one background read can run, and layout-generation checks reject invalidated results.
+- Exclude foreign structural background containers that host actual child controls from occupied space. Keep measuring their visible children, and search the full measured taskbar strip when a left-side control makes the preferred gap unavailable.
+- Show the application version in Settings and add **Copy taskbar diagnostics**. The report includes the running executable/version, timer preference/state, placement stage, occupied rectangles, and taskbar class/PID geometry to help identify why a panel is hidden. Copying is explicit and performs no network request.
+- Add native obstacle-reader regressions for valid accessibility variants and background containers while retaining collision checks and the existing portable layout tests.
+
+These changes address confirmed code paths that could keep the panel hidden. The exact cause on the user's Windows desktop is not established. Live taskbar display and the new Windows regressions still require Windows validation; portable tests and cross-compilation are separate evidence.
+
 ## 1.2.2 — November 12, 2026
 
 - Choose a full-size taskbar slot using the visible occupied rectangles of neighboring widgets and application buttons, with clearance between windows. Windows clipped by the taskbar are treated as occupied even when their original bounds extend above, below, or beyond it.

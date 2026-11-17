@@ -29,6 +29,7 @@ public:
     void hide();
     void explorerRestarted();
     void reposition();
+    [[nodiscard]] std::wstring diagnostics() const;
     [[nodiscard]] bool available() const noexcept { return layoutAvailable_; }
     [[nodiscard]] const std::wstring& lastError() const noexcept { return error_; }
     [[nodiscard]] HWND handle() const noexcept { return window_; }
@@ -59,6 +60,7 @@ private:
     std::wstring firstLine_;
     std::wstring secondLine_;
     std::wstring error_;
+    std::wstring diagnosticDetails_ = L"No taskbar placement has been requested yet.\n";
     COLORREF background_ = RGB(32, 32, 32);
     COLORREF foreground_ = RGB(245, 245, 245);
 };

@@ -99,6 +99,18 @@ bool clippedDescendantBounds(HWND window, HWND host, const RECT& strip, RECT& re
     return result.right > result.left && result.bottom > result.top;
 }
 
+bool hasVisibleChildContent(HWND window) {
+    RECT client{};
+    if (!clientScreenBounds(window, client)) return false;
+    std::size_t visited = 0;
+    for (HWND child = GetWindow(window, GW_CHILD); child && visited < maximumWindows;
+         child = GetWindow(child, GW_HWNDNEXT), ++visited) {
+        RECT bounds{};
+        if (clippedDescendantBounds(child, window, client, bounds)) return true;
+    }
+    return false;
+}
+
 void addObstacle(TaskbarObstacleSnapshot& snapshot, HWND host, RECT screen, bool widget) {
     MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&screen), 2);
     const TaskbarRect value{static_cast<int>(screen.left), static_cast<int>(screen.top),
@@ -139,9 +151,11 @@ struct ButtonState {
     ButtonJob attemptedJob;
     ButtonJob completedJob;
     std::vector<RECT> occupied;
+    std::wstring readStatus;
     HWINEVENTHOOK hook = nullptr;
     DWORD hookProcess = 0;
     DWORD hookThread = 0;
+    DWORD hookError = ERROR_SUCCESS;
     std::vector<HWND> watchedLists;
     std::vector<HWND> watchedWindows;
     std::uint64_t generation = 1;
@@ -227,9 +241,11 @@ void watchTaskLists(const std::shared_ptr<ButtonState>& state, const ButtonJob& 
         (process == GetCurrentProcessId() ? 0u : WINEVENT_SKIPOWNPROCESS);
     const auto hook = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE,
         nullptr, buttonLayoutChanged, process, 0, flags);
+    const DWORD hookError = hook ? ERROR_SUCCESS : GetLastError();
     std::lock_guard<std::mutex> lock(state->mutex);
     state->hook = hook;
     state->hookThread = GetCurrentThreadId();
+    state->hookError = hookError;
 }
 
 template<class T> class ComPtr {
@@ -249,53 +265,136 @@ public:
     VARIANT value;
 };
 
-bool occupiedRole(LONG role) {
+struct AccessibleReadError {
+    const wchar_t* stage = L"Accessibility read";
+    HRESULT status = E_FAIL;
+};
+
+bool readFailure(AccessibleReadError& error, const wchar_t* stage, HRESULT status) {
+    error = {stage, FAILED(status) ? status : E_FAIL};
+    return false;
+}
+
+std::wstring readErrorText(const wchar_t* stage, HRESULT status) {
+    wchar_t code[16]{};
+    std::swprintf(code, std::size(code), L"0x%08lX", static_cast<unsigned long>(status));
+    return std::wstring(stage) + L" failed (" + code + L").";
+}
+
+// Per-monitor-aware windows already use physical coordinates. For other
+// awareness modes, clip first and transform interior pixel points, never the
+// exclusive right/bottom corner outside the host. Expand for integer rounding.
+HRESULT physicalBoundsInHost(HWND host, RECT physical, const RECT& logicalClip, RECT& result) {
+    const auto user = GetModuleHandleW(L"user32.dll");
+    using GetContext = HANDLE (WINAPI*)(HWND);
+    using Awareness = int (WINAPI*)(HANDLE);
+    const auto context = loadFunction<GetContext>(user, "GetWindowDpiAwarenessContext");
+    const auto awareness = loadFunction<Awareness>(user, "GetAwarenessFromDpiAwarenessContext");
+    if (context && awareness && awareness(context(host)) == 2 /* DPI_AWARENESS_PER_MONITOR_AWARE */) {
+        return IntersectRect(&result, &physical, &logicalClip) ? S_OK : S_FALSE;
+    }
+    using SetContext = HANDLE (WINAPI*)(HANDLE);
+    const auto set = loadFunction<SetContext>(user, "SetThreadDpiAwarenessContext");
+    if (!set) return E_NOTIMPL;
+    HANDLE previous = set(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
+    if (!previous) previous = set(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-3)));
+    if (!previous) return E_FAIL;
+    RECT hostPhysical{};
+    const BOOL read = GetWindowRect(host, &hostPhysical);
+    set(previous);
+    if (!read) return E_FAIL;
+    if (!IntersectRect(&physical, &physical, &hostPhysical)) return S_FALSE;
+    using Convert = BOOL (WINAPI*)(HWND, LPPOINT);
+    const auto convert = loadFunction<Convert>(user, "PhysicalToLogicalPointForPerMonitorDPI");
+    if (!convert) return E_NOTIMPL;
+    POINT first{physical.left, physical.top}, last{physical.right - 1, physical.bottom - 1};
+    if (!convert(host, &first) || !convert(host, &last)) return E_FAIL;
+    const auto low = [](LONG coordinate) { return coordinate == LONG_MIN ? LONG_MIN : coordinate - 1; };
+    const auto high = [](LONG coordinate) { return coordinate >= LONG_MAX - 1 ? LONG_MAX : coordinate + 2; };
+    RECT logical{low((std::min)(first.x, last.x)), low((std::min)(first.y, last.y)),
+        high((std::max)(first.x, last.x)), high((std::max)(first.y, last.y))};
+    return IntersectRect(&result, &logical, &logicalClip) ? S_OK : S_FALSE;
+}
+
+bool appendAccessibleBounds(IAccessible* object, VARIANT child, HWND host,
+    const RECT& clip, std::vector<RECT>& occupied, AccessibleReadError& error) {
+    LONG x = 0, y = 0, width = 0, height = 0;
+    const HRESULT status = object->accLocation(&x, &y, &width, &height, child);
+    if (FAILED(status)) return readFailure(error, L"IAccessible::accLocation", status);
+    // Empty geometry is a valid result for non-rendered simple elements.
+    if (width == 0 || height == 0) return true;
+    const std::int64_t right = std::int64_t{x} + width, bottom = std::int64_t{y} + height;
+    if (width < 0 || height < 0 || right > LONG_MAX || bottom > LONG_MAX)
+        return readFailure(error, L"Accessibility rectangle validation", E_INVALIDARG);
+    const RECT physical{x, y, static_cast<LONG>(right), static_cast<LONG>(bottom)};
+    RECT bounds{};
+    const HRESULT converted = physicalBoundsInHost(host, physical, clip, bounds);
+    if (FAILED(converted)) return readFailure(error, L"Accessibility coordinate conversion", converted);
+    if (converted == S_OK) occupied.push_back(bounds);
+    return true;
+}
+
+bool interactiveRole(LONG role) {
     return role == ROLE_SYSTEM_PUSHBUTTON || role == ROLE_SYSTEM_PAGETAB ||
         role == ROLE_SYSTEM_LISTITEM || role == ROLE_SYSTEM_CHECKBUTTON ||
-        role == ROLE_SYSTEM_RADIOBUTTON || role == ROLE_SYSTEM_LINK || role == ROLE_SYSTEM_SPLITBUTTON ||
-        role == ROLE_SYSTEM_STATICTEXT || role == ROLE_SYSTEM_SEPARATOR ||
-        role == ROLE_SYSTEM_GRAPHIC || role == ROLE_SYSTEM_GRIP;
+        role == ROLE_SYSTEM_RADIOBUTTON || role == ROLE_SYSTEM_LINK || role == ROLE_SYSTEM_SPLITBUTTON;
 }
 
 bool inspectAccessible(IAccessible* object, VARIANT child, HWND host, const RECT& clip,
                        std::vector<RECT>& occupied, std::size_t& remaining,
-                       ULONGLONG started, unsigned depth, bool root) {
-    if (remaining == 0 || depth > 8 || GetTickCount64() - started > 500) return false;
+                       unsigned depth, bool root, AccessibleReadError& error) {
+    // Calls are already off the UI thread and limited to one outstanding job.
+    // A slow provider must not make every completed measurement unusable;
+    // layout generations reject results invalidated while a query was running.
+    if (remaining == 0 || depth > 8)
+        return readFailure(error, L"Accessibility traversal limits", HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA));
     --remaining;
-    Variant state, role;
-    if (FAILED(object->get_accState(child, &state.value)) || FAILED(object->get_accRole(child, &role.value))) return false;
-    if (state.value.vt == VT_I4 && (state.value.lVal & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN))) return true;
-    if (role.value.vt == VT_I4 && occupiedRole(role.value.lVal)) {
-        LONG x = 0, y = 0, width = 0, height = 0;
-        if (FAILED(object->accLocation(&x, &y, &width, &height, child))) return false;
-        const std::int64_t right = std::int64_t{x} + width, bottom = std::int64_t{y} + height;
-        if (width <= 0 || height <= 0 || right > LONG_MAX || bottom > LONG_MAX) return false;
-        // accLocation returns physical pixels; Win32 geometry above follows
-        // the host's awareness. Convert explicitly for system/unaware hosts.
-        using Convert = BOOL (WINAPI*)(HWND, LPPOINT);
-        static const auto convert = loadFunction<Convert>(GetModuleHandleW(L"user32.dll"),
-            "PhysicalToLogicalPointForPerMonitorDPI");
-        POINT first{x, y}, last{static_cast<LONG>(right), static_cast<LONG>(bottom)};
-        if (!convert || !convert(host, &first) || !convert(host, &last)) return false;
-        RECT bounds{first.x, first.y, last.x, last.y};
-        if (IntersectRect(&bounds, &bounds, &clip)) occupied.push_back(bounds);
-        return true;
-    }
-    if (child.vt == VT_I4 && child.lVal != CHILDID_SELF) {
+    // A full child's properties are supplied by its own object, not necessarily
+    // its parent. S_FALSE/null is the documented successful simple-element case.
+    const bool simple = child.vt == VT_I4 && child.lVal != CHILDID_SELF;
+    if (simple) {
         ComPtr<IDispatch> dispatch;
-        if (FAILED(object->get_accChild(child, dispatch.put())) || !dispatch.get()) return false;
-        ComPtr<IAccessible> nested;
-        if (FAILED(dispatch->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(nested.put())))) return false;
-        VARIANT self{}; self.vt = VT_I4; self.lVal = CHILDID_SELF;
-        return inspectAccessible(nested.get(), self, host, clip, occupied, remaining, started, depth + 1, false);
+        const HRESULT resolved = object->get_accChild(child, dispatch.put());
+        if (SUCCEEDED(resolved) && dispatch.get()) {
+            ComPtr<IAccessible> nested;
+            const HRESULT queried = dispatch->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(nested.put()));
+            if (FAILED(queried))
+                return appendAccessibleBounds(object, child, host, clip, occupied, error);
+            VARIANT self{}; self.vt = VT_I4; self.lVal = CHILDID_SELF;
+            return inspectAccessible(nested.get(), self, host, clip, occupied, remaining, depth + 1, false, error);
+        }
+        // Even a temporarily unavailable child object can have reliable parent
+        // geometry. Cover that rectangle instead of discarding every sibling.
+        if (FAILED(resolved)) return appendAccessibleBounds(object, child, host, clip, occupied, error);
     }
+    Variant state, role;
+    const HRESULT stateStatus = object->get_accState(child, &state.value);
+    if (SUCCEEDED(stateStatus) && state.value.vt == VT_I4 &&
+        (state.value.lVal & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN))) return true;
+    const HRESULT roleStatus = object->get_accRole(child, &role.value);
+    if (simple) return appendAccessibleBounds(object, child, host, clip, occupied, error);
+
     LONG count = 0;
-    if (FAILED(object->get_accChildCount(&count)) || count < 0 || count > static_cast<LONG>(maximumAccessibleNodes)) return false;
+    const HRESULT counted = object->get_accChildCount(&count);
+    if (FAILED(counted) || count < 0 || count > static_cast<LONG>(maximumAccessibleNodes)) {
+        if (!root) return appendAccessibleBounds(object, child, host, clip, occupied, error);
+        return readFailure(error, L"IAccessible::get_accChildCount", FAILED(counted) ? counted : E_INVALIDARG);
+    }
+    // A full button can contain smaller label/icon objects. Its entire clickable
+    // rectangle remains occupied; measuring just its children underestimates it.
+    if (!root && SUCCEEDED(roleStatus) && role.value.vt == VT_I4 && interactiveRole(role.value.lVal))
+        return appendAccessibleBounds(object, child, host, clip, occupied, error);
     if (count == 0) {
-        // An empty list is meaningful; an opaque root proxy is not evidence
-        // that its application-button area is empty.
-        return !root || (role.value.vt == VT_I4 &&
-            (role.value.lVal == ROLE_SYSTEM_PAGETABLIST || role.value.lVal == ROLE_SYSTEM_LIST));
+        // The client root is a container even if a proxy labels it as text or
+        // graphics. Its full rectangle is never an application-button obstacle.
+        if (root) {
+            if (FAILED(stateStatus) || FAILED(roleStatus))
+                return readFailure(error, L"Accessibility root properties", FAILED(stateStatus) ? stateStatus : roleStatus);
+            if (role.value.vt == VT_I4 && (role.value.lVal == ROLE_SYSTEM_PAGETABLIST ||
+                role.value.lVal == ROLE_SYSTEM_LIST || role.value.lVal == ROLE_SYSTEM_TOOLBAR)) return true;
+            return readFailure(error, L"Accessibility root exposes no button children", E_NOINTERFACE);
+        }
+        return appendAccessibleBounds(object, child, host, clip, occupied, error);
     }
     std::vector<VARIANT> children(static_cast<std::size_t>(count));
     for (auto& value : children) VariantInit(&value);
@@ -304,20 +403,27 @@ bool inspectAccessible(IAccessible* object, VARIANT child, HWND host, const RECT
         ~ClearChildren() { for (auto& value : values) VariantClear(&value); }
     } clear{children};
     LONG obtained = 0;
-    const HRESULT status = AccessibleChildren(object, 0, count, children.data(), &obtained);
-    bool success = SUCCEEDED(status) && obtained == count;
-    for (LONG i = 0; success && i < obtained; ++i) {
+    const HRESULT enumerated = AccessibleChildren(object, 0, count, children.data(), &obtained);
+    if (FAILED(enumerated) || obtained != count) {
+        if (!root) return appendAccessibleBounds(object, child, host, clip, occupied, error);
+        return readFailure(error, L"AccessibleChildren", FAILED(enumerated) ? enumerated : E_FAIL);
+    }
+    for (LONG i = 0; i < obtained; ++i) {
         const auto& value = children[static_cast<std::size_t>(i)];
+        bool success = false;
         if (value.vt == VT_DISPATCH && value.pdispVal) {
             ComPtr<IAccessible> nested;
-            success = SUCCEEDED(value.pdispVal->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(nested.put())));
-            VARIANT self{}; self.vt = VT_I4; self.lVal = CHILDID_SELF;
-            if (success) success = inspectAccessible(nested.get(), self, host, clip, occupied, remaining, started, depth + 1, false);
+            const HRESULT queried = value.pdispVal->QueryInterface(IID_IAccessible, reinterpret_cast<void**>(nested.put()));
+            if (SUCCEEDED(queried) && nested.get()) {
+                VARIANT self{}; self.vt = VT_I4; self.lVal = CHILDID_SELF;
+                success = inspectAccessible(nested.get(), self, host, clip, occupied, remaining, depth + 1, false, error);
+            } else return readFailure(error, L"Child IAccessible QueryInterface", FAILED(queried) ? queried : E_NOINTERFACE);
         } else if (value.vt == VT_I4) {
-            success = inspectAccessible(object, value, host, clip, occupied, remaining, started, depth + 1, false);
-        } else success = false;
+            success = inspectAccessible(object, value, host, clip, occupied, remaining, depth + 1, false, error);
+        } else return readFailure(error, L"AccessibleChildren variant", E_INVALIDARG);
+        if (!success) return false;
     }
-    return success;
+    return true;
 }
 
 struct WorkerArguments {
@@ -331,27 +437,38 @@ unsigned __stdcall readButtons(void* parameter) {
     bool success = false;
     std::vector<RECT> occupied;
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    AccessibleReadError error{L"CoInitializeEx for taskbar accessibility", initialized};
     try {
         ThreadDpi dpi(work->job.host);
         success = SUCCEEDED(initialized);
-        const auto started = GetTickCount64();
         std::size_t remaining = maximumAccessibleNodes;
         for (const auto& list : work->job.lists) {
-            if (!success || !IsWindow(list.window)) { success = false; break; }
+            if (!success) break;
+            if (!IsWindow(list.window)) {
+                success = readFailure(error, L"Task-list window validation", HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE));
+                break;
+            }
             ComPtr<IAccessible> accessible;
-            success = SUCCEEDED(AccessibleObjectFromWindow(list.window, OBJID_CLIENT, IID_IAccessible,
-                reinterpret_cast<void**>(accessible.put())));
+            const HRESULT opened = AccessibleObjectFromWindow(list.window, OBJID_CLIENT, IID_IAccessible,
+                reinterpret_cast<void**>(accessible.put()));
+            success = SUCCEEDED(opened) && accessible.get();
+            if (!success) readFailure(error, L"AccessibleObjectFromWindow", FAILED(opened) ? opened : E_NOINTERFACE);
             VARIANT self{}; self.vt = VT_I4; self.lVal = CHILDID_SELF;
             RECT clipped{};
-            if (success) success = IntersectRect(&clipped, &list.bounds, &work->job.strip) != FALSE &&
-                inspectAccessible(accessible.get(), self, work->job.host, clipped, occupied, remaining, started, 0, true);
+            if (success && !IntersectRect(&clipped, &list.bounds, &work->job.strip))
+                success = readFailure(error, L"Task-list intersection", HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+            if (success) success = inspectAccessible(accessible.get(), self, work->job.host,
+                clipped, occupied, remaining, 0, true, error);
         }
-    } catch (...) { success = false; }
+    } catch (...) { success = readFailure(error, L"Taskbar accessibility exception", E_FAIL); }
     if (SUCCEEDED(initialized)) CoUninitialize();
     {
         std::lock_guard<std::mutex> lock(work->state->mutex);
         work->state->running = false;
         work->state->success = success && work->generation == work->state->generation;
+        work->state->readStatus = work->generation != work->state->generation
+            ? L"Taskbar changed during accessibility read; waiting for a fresh measurement."
+            : success ? L"" : readErrorText(error.stage, error.status);
         work->state->completed = GetTickCount64();
         work->state->completedJob = std::move(work->job);
         work->state->completedGeneration = work->generation;
@@ -375,6 +492,20 @@ void applicationButtons(const ButtonJob& job, HWND panel, TaskbarObstacleSnapsho
             snapshot.taskButtonsKnown = true;
             for (const auto& bounds : state->occupied) addObstacle(snapshot, job.host, bounds, false);
         }
+        if (!snapshot.taskButtonsKnown) {
+            if (!state->hook)
+                snapshot.buttonStatus = readErrorText(L"SetWinEventHook for taskbar changes",
+                    state->hookError ? HRESULT_FROM_WIN32(state->hookError) : E_FAIL);
+            else if (state->running)
+                snapshot.buttonStatus = L"Taskbar accessibility read is running (" +
+                    std::to_wstring(now - state->attempted) + L" ms).";
+            else if (!state->readStatus.empty()) snapshot.buttonStatus = state->readStatus;
+            else if (state->success && now - state->completed > buttonCacheLifetime)
+                snapshot.buttonStatus = L"Taskbar button bounds expired; waiting for a fresh measurement.";
+            else if (state->completedGeneration != state->generation)
+                snapshot.buttonStatus = L"Taskbar layout generation changed; waiting for button bounds.";
+            else snapshot.buttonStatus = L"Waiting for the first taskbar button measurement.";
+        }
         if (state->hook && !state->running && (!sameJob(job, state->attemptedJob) ||
             state->attemptedGeneration != state->generation || now - state->attempted >= buttonQueryInterval)) {
             work = std::make_unique<WorkerArguments>();
@@ -393,6 +524,8 @@ void applicationButtons(const ButtonJob& job, HWND panel, TaskbarObstacleSnapsho
     else {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->running = false;
+        state->readStatus = readErrorText(L"Starting taskbar accessibility reader", E_OUTOFMEMORY);
+        snapshot.buttonStatus = state->readStatus;
     }
 }
 
@@ -409,19 +542,28 @@ struct WindowSearch {
 
 BOOL CALLBACK descendant(HWND window, LPARAM context) {
     auto& search = *reinterpret_cast<WindowSearch*>(context);
-    if (++search.visited > maximumWindows) { search.result.taskButtonsKnown = false; return FALSE; }
+    if (++search.visited > maximumWindows) {
+        search.result.taskButtonsKnown = false;
+        search.result.buttonStatus = L"Taskbar child window enumeration exceeded 2048 windows.";
+        return FALSE;
+    }
     if (window == search.panel || (search.panel && IsChild(search.panel, window))) return TRUE;
     RECT bounds{};
     if (!clippedDescendantBounds(window, search.host, search.strip, bounds)) return TRUE;
     DWORD process = 0;
     GetWindowThreadProcessId(window, &process);
+    const auto name = className(window);
     if (process != search.hostProcess) {
+        // A known structural host can span the entire strip while only its
+        // children draw controls. Do not turn that empty background into a
+        // solid obstacle; EnumChildWindows still visits its visible contents.
+        // Keep leaf hosts and custom foreign widgets occupied in full.
+        if (containerClass(name) && hasVisibleChildContent(window)) return TRUE;
         // Process identity is enough: foreign taskbar children occupy pixels
         // even when their captions, class names, or raw sizes are unexpected.
         addObstacle(search.result, search.host, bounds, true);
         return TRUE;
     }
-    const auto name = className(window);
     if (name == L"MSTaskSwWClass" || taskListClass(name)) search.taskContainerSeen = true;
     if (taskListClass(name)) {
         search.buttons.lists.push_back({window, bounds});
@@ -449,7 +591,11 @@ BOOL CALLBACK descendant(HWND window, LPARAM context) {
 BOOL CALLBACK aboveTaskbar(HWND window, LPARAM context) {
     auto& search = *reinterpret_cast<WindowSearch*>(context);
     if (window == search.host) return FALSE;
-    if (++search.visited > maximumWindows) { search.result.taskButtonsKnown = false; return FALSE; }
+    if (++search.visited > maximumWindows) {
+        search.result.taskButtonsKnown = false;
+        search.result.buttonStatus = L"Taskbar window enumeration exceeded 2048 windows.";
+        return FALSE;
+    }
     if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE) || IsIconic(window) || cloaked(window)) return TRUE;
     RECT bounds{};
     if (GetWindowRect(window, &bounds) && IntersectRect(&bounds, &bounds, &search.strip))
@@ -464,6 +610,7 @@ TaskbarObstacleSnapshot collectTaskbarObstacles(HWND host, HWND panel, bool incl
     search.panel = panel;
     if (!host || !clientScreenBounds(host, search.strip)) {
         search.result.taskButtonsKnown = false;
+        search.result.buttonStatus = L"Could not read the taskbar host client rectangle.";
         return search.result;
     }
     GetWindowThreadProcessId(host, &search.hostProcess);
@@ -475,11 +622,15 @@ TaskbarObstacleSnapshot collectTaskbarObstacles(HWND host, HWND panel, bool incl
     // occlude it, even when invisible resize borders intersect its strip.
     if (includeTopLevel) EnumWindows(aboveTaskbar, reinterpret_cast<LPARAM>(&search));
     const auto hostClass = className(host);
-    if ((search.taskContainerSeen || hostClass == L"Shell_TrayWnd") && search.buttons.lists.empty())
+    if ((search.taskContainerSeen || hostClass == L"Shell_TrayWnd") && search.buttons.lists.empty()) {
         search.result.taskButtonsKnown = false;
+        search.result.buttonStatus = L"The classic Windows taskbar application-list window was not found.";
+    }
     const bool geometryKnown = search.result.taskButtonsKnown;
+    const auto geometryStatus = search.result.buttonStatus;
     applicationButtons(search.buttons, panel, search.result);
     search.result.taskButtonsKnown = geometryKnown && search.result.taskButtonsKnown;
+    if (!geometryKnown && !geometryStatus.empty()) search.result.buttonStatus = geometryStatus;
     return search.result;
 }
 

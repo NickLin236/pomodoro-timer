@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,7 +33,7 @@ enum Command : int {
     SecondsInput, CountdownAction, CountdownReset, SaveCountdown,
     SoundCheck, StartupCheck, BackgroundCombo, TaskbarCombo, SaveSettings,
     TestNotification, OpenWindow, OpenSettings, ExitApplication,
-    TogglePomodoro, ToggleCountdown, StatusCheck
+    TogglePomodoro, ToggleCountdown, StatusCheck, CopyDiagnostics, VersionLabel
 };
 
 std::wstring wide(const std::string& text) {
@@ -212,8 +213,11 @@ private:
         ComboBox_AddString(source_, L"Pomodoro"); ComboBox_AddString(source_, L"General timer");
         button(L"Save settings", SaveSettings, 2, 28, 385, 140);
         button(L"Test notification", TestNotification, 2, 190, 385, 180);
+        button(L"Copy taskbar diagnostics", CopyDiagnostics, 2, 390, 385, 220);
         label(L"Minimize hides the app in the notification area. Close exits.\r\nNotifications depend on your Windows notification settings.",
-              2, 28, 436, 590, 58);
+              2, 28, 436, 590, 42);
+        const auto version = L"Pomodoro " + wide(POMODORO_VERSION);
+        add(L"STATIC", version.c_str(), SS_LEFT, VersionLabel, 2, 28, 486, 590, 20);
         status_ = label(L"Ready. Minimize hides the app; Close and Exit save and quit.", -1, 28, 514, 590, 65);
         button(L"Exit", ExitApplication, -1, 524, 590, 100);
         using GetDpiForWindowFunction = UINT (WINAPI*)(HWND);
@@ -434,6 +438,36 @@ private:
     }
     void error(const std::wstring& text) { MessageBoxW(window_, text.c_str(), L"Pomodoro", MB_OK | MB_ICONERROR); }
 
+    std::wstring taskbarDiagnostics() const {
+        std::wostringstream report;
+        report << L"Pomodoro " << wide(POMODORO_VERSION) << L" taskbar diagnostics\r\n";
+        std::vector<wchar_t> path(32768);
+        const auto length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length && length < path.size()) report << L"Executable: " << std::wstring(path.data(), length) << L"\r\n";
+        report << L"Taskbar status preference: " << (controller_.preferences().showTaskbarStatus ? L"enabled" : L"disabled")
+            << L"\r\nPomodoro: " << statusName(controller_.engine().pomodoro.status)
+            << L"; countdown: " << statusName(controller_.engine().countdown.status) << L"\r\n";
+        if (taskbarPanel_) report << taskbarPanel_->diagnostics();
+        else report << L"The taskbar panel has not been initialized.\r\n";
+        return report.str();
+    }
+
+    bool copyDiagnostics() {
+        const auto text = taskbarDiagnostics();
+        const auto bytes = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!memory) return false;
+        void* destination = GlobalLock(memory);
+        if (!destination) { GlobalFree(memory); return false; }
+        std::memcpy(destination, text.c_str(), bytes);
+        GlobalUnlock(memory);
+        if (!OpenClipboard(window_)) { GlobalFree(memory); return false; }
+        const bool copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+        CloseClipboard();
+        if (!copied) GlobalFree(memory);
+        return copied;
+    }
+
     std::wstring currentSummary() const {
         const auto& engine = controller_.engine();
         return std::wstring(engine.pomodoro.phase == Phase::Focus ? L"Focus " : L"Break ") +
@@ -578,6 +612,10 @@ private:
         switch (id) {
         case OpenWindow: open(); break;
         case OpenSettings: TabCtrl_SetCurSel(tabs_, 2); choosePage(2); open(); break;
+        case CopyDiagnostics:
+            if (copyDiagnostics()) notice_ = L"Taskbar diagnostics copied. Paste the report into your bug report.";
+            else error(L"Windows could not copy the diagnostics. Please try again.");
+            break;
         case PomodoroAction:
             if (active(controller_.engine().pomodoro.status)) controller_.togglePomodoro();
             else {

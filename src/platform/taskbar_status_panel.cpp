@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 #include <utility>
 
 namespace pomodoro {
@@ -40,6 +41,52 @@ private:
     SetContext set_ = nullptr;
     HANDLE previous_ = nullptr;
 };
+
+void describeRect(std::wostream& output, const TaskbarRect& rect) {
+    output << L"[" << rect.left << L"," << rect.top << L"," << rect.right << L"," << rect.bottom << L"]";
+}
+
+struct DiagnosticWindows {
+    HWND host;
+    std::wostringstream& output;
+    unsigned count = 0;
+};
+
+BOOL CALLBACK describeChild(HWND window, LPARAM context) {
+    auto& report = *reinterpret_cast<DiagnosticWindows*>(context);
+    if (++report.count > 128) { report.output << L"... window list truncated\n"; return FALSE; }
+    wchar_t name[128]{};
+    DWORD process = 0;
+    RECT bounds{};
+    GetClassNameW(window, name, 128);
+    GetWindowThreadProcessId(window, &process);
+    GetWindowRect(window, &bounds);
+    MapWindowPoints(HWND_DESKTOP, report.host, reinterpret_cast<POINT*>(&bounds), 2);
+    report.output << L"  " << name << L" PID=" << process << L" visible="
+        << ((GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE) ? L"yes" : L"no") << L" rect=";
+    describeRect(report.output, {bounds.left, bounds.top, bounds.right, bounds.bottom});
+    const auto extended = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    report.output << L" exstyle=0x" << std::hex << extended << std::dec;
+    if (extended & WS_EX_LAYERED) {
+        COLORREF color = 0; BYTE alpha = 0; DWORD flags = 0;
+        if (GetLayeredWindowAttributes(window, &color, &alpha, &flags) && (flags & LWA_ALPHA))
+            report.output << L" alpha=" << static_cast<unsigned>(alpha);
+    }
+    report.output << L"\n";
+    return TRUE;
+}
+
+BOOL CALLBACK describeAbove(HWND window, LPARAM context) {
+    auto& report = *reinterpret_cast<DiagnosticWindows*>(context);
+    if (window == report.host) return FALSE;
+    if (!(GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE) || IsIconic(window)) return TRUE;
+    RECT strip{}, bounds{}, overlap{};
+    GetClientRect(report.host, &strip);
+    MapWindowPoints(report.host, HWND_DESKTOP, reinterpret_cast<POINT*>(&strip), 2);
+    if (GetWindowRect(window, &bounds) && IntersectRect(&overlap, &strip, &bounds))
+        return describeChild(window, context);
+    return TRUE;
+}
 
 } // namespace
 
@@ -176,6 +223,7 @@ void TaskbarStatusPanel::reposition() {
     RECT taskbar{};
     if (!locate(host, taskbar)) return;
     DpiScope dpiContext(host);
+    diagnosticDetails_ = L"Taskbar host found; preparing panel geometry.\n";
     if (window_ && (!IsWindow(window_) || host_ != host)) {
         if (IsWindow(window_)) DestroyWindow(window_);
         window_ = nullptr;
@@ -209,12 +257,32 @@ void TaskbarStatusPanel::reposition() {
     const TaskbarRect strip{MulDiv(48, static_cast<int>(dpi), 96), inset,
         static_cast<int>(taskbar.right) - inset, static_cast<int>(taskbar.bottom) - inset};
     const auto snapshot = collectTaskbarObstacles(host, window_, !explicitHost_);
+    std::wostringstream report;
+    report << L"Strip="; describeRect(report, strip);
+    report << L" panel size=" << width << L"x" << height << L" gap=" << gap
+        << L" DPI=" << dpi << L"\nButtons known=" << (snapshot.taskButtonsKnown ? L"yes" : L"no")
+        << L"; " << snapshot.buttonStatus << L"\nWidget left=";
+    if (snapshot.widgetLeft) report << *snapshot.widgetLeft; else report << L"none";
+    report << L"\nOccupied rectangles (host client coordinates):\n";
+    std::size_t described = 0;
+    for (const auto& occupied : snapshot.occupied) {
+        if (++described > 128) { report << L"... truncated\n"; break; }
+        report << L"  "; describeRect(report, occupied); report << L"\n";
+    }
+    diagnosticDetails_ = report.str();
     if (!snapshot.taskButtonsKnown) {
-        fail(L"Waiting for taskbar button bounds before showing timer status.");
+        const auto reason = L"Taskbar button bounds unavailable. " + snapshot.buttonStatus;
+        fail(reason.c_str());
         return;
     }
     const int preferredRight = snapshot.widgetLeft ? *snapshot.widgetLeft - gap : strip.right;
-    const auto slot = findTaskbarSlot(strip, preferredRight, width, height, gap, snapshot.occupied);
+    auto slot = findTaskbarSlot(strip, preferredRight, width, height, gap, snapshot.occupied);
+    if (!slot) {
+        // A left-side Search/Start widget must not turn a placement preference
+        // into a claim that the entire taskbar has no room.
+        slot = findTaskbarSlot(strip, strip.right, width, height, gap, snapshot.occupied);
+        diagnosticDetails_ += L"Preferred gap unavailable; checked the full measured strip.\n";
+    }
     if (!slot) {
         fail(L"There is no free taskbar space for timer status. It will return when space is available.");
         return;
@@ -236,6 +304,8 @@ void TaskbarStatusPanel::reposition() {
     MapWindowPoints(HWND_DESKTOP, host, reinterpret_cast<POINT*>(&actual), 2);
     const auto latest = collectTaskbarObstacles(host, window_, !explicitHost_);
     const TaskbarRect placed{actual.left, actual.top, actual.right, actual.bottom};
+    report.str(L""); report.clear(); report << L"Actual panel="; describeRect(report, placed); report << L"\n";
+    diagnosticDetails_ += report.str();
     if (!latest.taskButtonsKnown || actual.right - actual.left != width || actual.bottom - actual.top != height ||
         !taskbarSlotIsFree(placed, strip, gap, latest.occupied)) {
         fail(L"Taskbar layout changed; timer status is hidden until a safe gap is available.");
@@ -245,6 +315,28 @@ void TaskbarStatusPanel::reposition() {
     ShowWindow(window_, SW_SHOWNOACTIVATE);
     layoutAvailable_ = true;
     error_.clear();
+}
+
+std::wstring TaskbarStatusPanel::diagnostics() const {
+    std::wostringstream report;
+    report << L"Status requested=" << (requestedVisible_ ? L"yes" : L"no")
+        << L"; available=" << (layoutAvailable_ ? L"yes" : L"no")
+        << L"; window visible=" << (window_ && IsWindowVisible(window_) ? L"yes" : L"no") << L"\n"
+        << L"Last placement check age (ms)=" << (lastLayoutCheck_ ? GetTickCount64() - lastLayoutCheck_ : 0) << L"\n"
+        << L"Last error=" << (error_.empty() ? L"none" : error_) << L"\n" << diagnosticDetails_;
+    const HWND host = host_ && IsWindow(host_) ? host_ : FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (host) {
+        DpiScope dpiContext(host);
+        report << L"Taskbar child windows (class/PID/visibility/rectangle only):\n";
+        DiagnosticWindows windows{host, report};
+        EnumChildWindows(host, describeChild, reinterpret_cast<LPARAM>(&windows));
+        if (!explicitHost_) {
+            report << L"Top-level windows above the taskbar intersecting its strip:\n";
+            windows.count = 0;
+            EnumWindows(describeAbove, reinterpret_cast<LPARAM>(&windows));
+        }
+    }
+    return report.str();
 }
 
 void TaskbarStatusPanel::fail(const wchar_t* error) {

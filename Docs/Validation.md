@@ -1,8 +1,16 @@
 # Validation record
 
-Initial implementation: November 9, 2026. Version 1.1.0 update: November 10, 2026. Version 1.2.0 update: November 11, 2026. Version 1.2.1 update: November 11, 2026. Version 1.2.2 update: November 12, 2026.
+Initial implementation: November 9, 2026. Version 1.1.0 update: November 10, 2026. Version 1.2.0 update: November 11, 2026. Version 1.2.1 update: November 11, 2026. Version 1.2.2 update: November 12, 2026. Version 1.2.3 update: November 17, 2026.
 
 The development environment is Linux with GCC 9.4 and CMake 3.16.3. This environment cannot demonstrate Windows 10 desktop integration or measure the target application's runtime resource usage.
+
+Version 1.2.3 follows the user report that neither running timer displayed status after the 1.2.2 collision changes. The report did not identify a placement-stage message, so the exact cause on that Windows desktop remains unknown. Code review found paths that reject valid accessibility simple elements, ask parent properties before resolving full child objects, treat text/graphic container roots as solid occupied regions, or attempt DPI conversion before clipping physical rectangles. A foreign structural background container and an overly restrictive leftward preference can also incorrectly eliminate free space. The new version addresses these paths while retaining occupied-rectangle collision checks. It also removes the 500 ms discard threshold from background accessibility traversal: slow completed reads remain usable when their layout generation is still current. Node/depth limits and the single outstanding reader remain in place.
+
+Settings now exposes the running version and **Copy taskbar diagnostics**. An explicit click copies the executable/version, preference/timer state, placement stage/reason and geometry, and a bounded taskbar class/PID/visibility/rectangle list. It performs no upload and reads no other window titles or contents. This is intended to establish the next failure's actual branch instead of inferring it from a missing panel.
+
+All five portable Release CTest suites pass in 0.84 seconds. The Windows application and all seven Windows test executables cross-compile successfully. The new native obstacle-reader suite covers six accessibility scenarios with deterministic COM objects; native UI regressions cover foreign background containers and the full-strip gap fallback. These Windows regressions have been compiled, not executed in this Linux environment. No Windows 1.2.3 desktop execution, successful user placement, or confirmed machine-specific root cause is claimed here.
+
+Version 1.2.3 uses matching CMake/resource/manifest metadata and a new `v1.2.3` tag. Local preparation does not publish the GitHub release; the tagged workflow must succeed. Exit the old running copy and verify the Settings version before testing the new executable.
 
 Version 1.2.2 replaces the previous widget-anchor heuristics after the user reported continued overlap. The previous filter could reject a visibly occupied window because its original bounds extended beyond the taskbar. The new path collects clipped occupied rectangles, includes unknown foreign widgets, checks application-button bounds asynchronously, and searches for a full-size slot with horizontal clearance. It validates the actual panel rectangle before showing it and hides the panel when no safe slot or usable button bounds are available. Explorer and neighboring windows are not resized.
 

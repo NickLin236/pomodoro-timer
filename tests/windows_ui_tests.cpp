@@ -105,6 +105,7 @@ private:
 constexpr UINT syntheticPanelCallback = WM_APP + 80;
 constexpr wchar_t syntheticTaskbarProperty[] = L"PomodoroNative.SyntheticTaskbar";
 constexpr wchar_t foreignTaskbarClass[] = L"PomodoroNative.ForeignTaskbarTest";
+constexpr UINT foreignRemoveContents = WM_APP + 81;
 
 struct PanelCallbacks {
     int open = 0;
@@ -181,6 +182,10 @@ public:
 };
 
 LRESULT CALLBACK foreignTaskbarProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == foreignRemoveContents) {
+        while (HWND child = GetWindow(window, GW_CHILD)) DestroyWindow(child);
+        return TRUE;
+    }
     if (message == WM_GETTEXT) {
         constexpr wchar_t caption[] = L"TrafficMonitorTaskbarWindow";
         if (!wParam || !lParam) return 0;
@@ -194,7 +199,7 @@ LRESULT CALLBACK foreignTaskbarProcedure(HWND window, UINT message, WPARAM wPara
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-int foreignTaskbarHelper(int count, char** arguments) {
+int foreignTaskbarHelper(int count, char** arguments, bool container = false) {
     if (count != 4) return 2;
     const HWND parent = reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(arguments[2])));
     DWORD parentProcess = 0;
@@ -210,14 +215,24 @@ int foreignTaskbarHelper(int count, char** arguments) {
     WNDCLASSW type{};
     type.hInstance = GetModuleHandleW(nullptr);
     type.lpfnWndProc = foreignTaskbarProcedure;
-    type.lpszClassName = foreignTaskbarClass;
+    type.lpszClassName = container ? L"WorkerW" : foreignTaskbarClass;
     if (!RegisterClassW(&type)) return 6;
     // Leave the system caption cache empty. A foreign GetWindowText call sees
     // no caption, while a bounded WM_GETTEXT request reaches the custom text.
+    RECT client{};
+    if (!GetClientRect(parent, &client)) return 7;
     HWND child = CreateWindowExW(WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE,
-        foreignTaskbarClass, L"", WS_CHILD | WS_VISIBLE,
-        420, 0, 150, 46, parent, nullptr, type.hInstance, nullptr);
+        type.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
+        container ? 0 : 420, 0, container ? client.right : 150,
+        container ? client.bottom : 46, parent, nullptr, type.hInstance, nullptr);
     if (!child) return 7;
+    if (container) {
+        const DWORD exStyle = WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE;
+        if (!CreateWindowExW(exStyle, L"STATIC", L"Foreign left control", WS_CHILD | WS_VISIBLE,
+                0, 0, 100, client.bottom, child, nullptr, type.hInstance, nullptr) ||
+            !CreateWindowExW(exStyle, L"STATIC", L"Foreign right status", WS_CHILD | WS_VISIBLE,
+                800, 0, 160, client.bottom, child, nullptr, type.hInstance, nullptr)) return 8;
+    }
     SetEvent(ready.get());
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -249,7 +264,8 @@ DWORD waitForTestObject(HANDLE object, DWORD timeout) {
 
 class ForeignTaskbarChild {
 public:
-    explicit ForeignTaskbarChild(HWND host) : host_(host) {
+    explicit ForeignTaskbarChild(HWND host, bool container = false)
+        : host_(host), class_(container ? L"WorkerW" : foreignTaskbarClass) {
         static unsigned serial = 0;
         const auto name = L"Local\\PomodoroNative.ForeignTaskbarTest." + std::to_wstring(GetCurrentProcessId()) +
             L"." + std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(++serial);
@@ -258,7 +274,8 @@ public:
         std::vector<wchar_t> executable(32768);
         const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
         require(length != 0 && length < executable.size(), "Could not locate foreign taskbar test executable");
-        auto command = L"\"" + std::wstring(executable.data(), length) + L"\" --synthetic-taskbar-child " +
+        auto command = L"\"" + std::wstring(executable.data(), length) +
+            (container ? L"\" --synthetic-taskbar-container " : L"\" --synthetic-taskbar-child ") +
             std::to_wstring(reinterpret_cast<UINT_PTR>(host_)) + L" " + name;
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         PROCESS_INFORMATION process{};
@@ -270,7 +287,7 @@ public:
             stop();
             throw std::runtime_error("Foreign taskbar test process did not become ready");
         }
-        window = FindWindowExW(host_, nullptr, foreignTaskbarClass, nullptr);
+        window = FindWindowExW(host_, nullptr, class_, nullptr);
         if (!window) {
             stop();
             throw std::runtime_error("Could not find foreign synthetic taskbar child");
@@ -281,7 +298,7 @@ public:
 private:
     void stop() {
         if (!process_) return;
-        if (!window) window = FindWindowExW(host_, nullptr, foreignTaskbarClass, nullptr);
+        if (!window) window = FindWindowExW(host_, nullptr, class_, nullptr);
         if (window) PostMessageW(window, WM_CLOSE, 0, 0);
         if (waitForTestObject(process_.get(), 2000) != WAIT_OBJECT_0) {
             // This handle belongs only to the helper started by this fixture.
@@ -291,6 +308,7 @@ private:
         process_.reset();
     }
     HWND host_;
+    const wchar_t* class_;
     UniqueHandle process_;
 };
 
@@ -407,6 +425,48 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
         require(panel.available() && screenBounds(panelWindow).right <= monitorBefore.left,
                 "An off-taskbar Traffic Monitor prevented a valid descendant anchor from being used");
         DestroyWindow(staleMonitor);
+
+        // A foreign structural host can span the taskbar without drawing
+        // across it. Measure its controls, not its empty background frame.
+        {
+            ForeignTaskbarChild container(host.window, true);
+            HWND left = FindWindowExW(container.window, nullptr, L"STATIC", L"Foreign left control");
+            HWND right = FindWindowExW(container.window, nullptr, L"STATIC", L"Foreign right status");
+            require(left && right, "Foreign structural host did not create its visible controls");
+            const auto containerBefore = screenBounds(container.window);
+            const auto leftBefore = screenBounds(left);
+            const auto rightBefore = screenBounds(right);
+            ShowWindow(left, SW_HIDE);
+            const auto snapshot = collectTaskbarObstacles(host.window, panel.handle(), false);
+            require(std::none_of(snapshot.occupied.begin(), snapshot.occupied.end(), [&](const TaskbarRect& rectangle) {
+                return rectangle.left <= 0 && rectangle.right >= hostClient.right - hostClient.left;
+            }), "Foreign background frame was counted as occupied taskbar space");
+            panel.update(L"Timer 00:30", L"Countdown", true);
+            require(panel.available() && screenBounds(panelWindow).right <= rightBefore.left,
+                    "Empty foreign structural background hid a panel with a valid gap");
+
+            // A left-side foreign control must remain an obstacle without
+            // making the free gap between the controls inaccessible.
+            ShowWindow(left, SW_SHOWNOACTIVATE);
+            panel.update(L"Timer 00:29", L"Countdown", true);
+            const auto actual = screenBounds(panelWindow);
+            require(panel.available() && actual.left >= leftBefore.right + 2 && actual.right <= rightBefore.left - 2,
+                    "Left-side foreign control hid the free gap between taskbar controls");
+            requireSameBounds(container.window, containerBefore, "Panel moved the foreign structural host");
+            requireSameBounds(left, leftBefore, "Panel moved the foreign left control");
+            requireSameBounds(right, rightBefore, "Panel moved the foreign right control");
+
+            // Structural class names alone do not prove empty space. Once a
+            // foreign host has no visible child content, keep its full body
+            // occupied, including the existing full-width no-room behavior.
+            DWORD_PTR removed = 0;
+            require(SendMessageTimeoutW(container.window, foreignRemoveContents, 0, 0,
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &removed) != 0 && removed,
+                "Could not remove foreign structural test controls");
+            panel.update(L"Timer 00:28", L"Countdown", true);
+            require(!panel.available() && !IsWindowVisible(panelWindow),
+                    "Foreign leaf host was incorrectly treated as empty structural background");
+        }
 
         // Reproduce the screenshot's adjacent weather widget. No caption or
         // hard-coded weather-class rule is needed to keep compact widgets clear.
@@ -718,6 +778,8 @@ int main(int count, char** arguments) {
     try {
         if (count > 1 && std::string(arguments[1]) == "--synthetic-taskbar-child")
             return foreignTaskbarHelper(count, arguments);
+        if (count > 1 && std::string(arguments[1]) == "--synthetic-taskbar-container")
+            return foreignTaskbarHelper(count, arguments, true);
         ComLifetime com;
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};

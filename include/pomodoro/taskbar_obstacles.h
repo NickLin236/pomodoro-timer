@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <string>
 #include "pomodoro/taskbar_layout.h"
 
 namespace pomodoro {
@@ -17,6 +18,7 @@ struct TaskbarObstacleSnapshot {
     // False while application-button geometry is unavailable or stale. The
     // caller must not display a panel based on incomplete occupied geometry.
     bool taskButtonsKnown = true;
+    std::wstring buttonStatus;
 };
 
 // Call from a thread using the taskbar host's DPI context. Rectangles are in
