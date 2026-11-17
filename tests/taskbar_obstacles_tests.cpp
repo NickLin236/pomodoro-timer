@@ -243,6 +243,30 @@ void perMonitorBoundsDoNotNeedEdgePointConversion(HWND host) {
     CHECK(EqualRect(&actual, &expected));
     CHECK(physicalBoundsInHost(host, {1000, 0, 1100, 40}, clip, actual) == S_FALSE);
 }
+
+void reparentedPopupClipsAgainstItsStructuralParent(HWND host) {
+    ShowWindow(host, SW_SHOWNOACTIVATE);
+    HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Hidden popup owner", WS_POPUP,
+        -32000, -32000, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    CHECK(owner);
+    HWND popup = CreateWindowExW(WS_EX_NOACTIVATE, L"STATIC", L"Embedded monitor", WS_POPUP,
+        0, 0, 100, 40, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
+    CHECK(popup);
+    SetParent(popup, host);
+    CHECK(GetAncestor(popup, GA_PARENT) == host);
+    CHECK(GetParent(popup) != host);
+    CHECK(GetWindowLongPtrW(popup, GWL_STYLE) & WS_POPUP);
+    CHECK(!(GetWindowLongPtrW(owner, GWL_STYLE) & WS_VISIBLE));
+    CHECK(SetWindowPos(popup, nullptr, 700, -4, 400, 48, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW));
+    RECT strip{}, actual{};
+    CHECK(clientScreenBounds(host, strip));
+    CHECK(clippedDescendantBounds(popup, host, strip, actual));
+    const RECT expected{strip.left + 700, strip.top, strip.right, strip.bottom};
+    CHECK(EqualRect(&actual, &expected));
+    DestroyWindow(popup);
+    DestroyWindow(owner);
+    ShowWindow(host, SW_HIDE);
+}
 } // namespace
 
 int main() {
@@ -255,8 +279,9 @@ int main() {
         textAndGraphicRootContainersDoNotFillTheTaskbar(host.window);
         unavailablePropertiesUseGeometryAndUnknownGeometryStillFails(host.window);
         perMonitorBoundsDoNotNeedEdgePointConversion(host.window);
+        reparentedPopupClipsAgainstItsStructuralParent(host.window);
         slowProviderDoesNotDiscardAValidMeasurement(host.window);
-        std::cout << "6 taskbar accessibility scenarios passed\n";
+        std::cout << "7 taskbar accessibility and window geometry scenarios passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;

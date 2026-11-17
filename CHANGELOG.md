@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.4 — November 17, 2026
+
+- Follow the actual window-parent chain when measuring taskbar widgets. Reparented popup-style windows can retain a different owner; that owner must not determine taskbar clipping or visibility.
+- Include popup-style Traffic Monitor windows in occupied-space checks instead of placing the timer over their readings. The supplied diagnostics showed a 71-pixel overlap with a monitor rectangle missing from the occupied list.
+- Add popup/hidden-owner and cross-process regressions, plus the reported 150% DPI geometry case. Diagnostics now distinguish window style, structural parent, owner, and the `GetParent` result.
+
+The supplied report identifies the missing rectangle and a matching parent/owner code path. The corrected build still requires validation on the user's Windows desktop; portable tests and cross-compilation do not establish actual placement there.
+
 ## 1.2.3 — November 17, 2026
 
 - Correct taskbar accessibility traversal for valid simple elements and full child objects. Inspect container children before treating text or graphic roles as occupied pixels, and clip accessibility bounds before converting DPI coordinates.

@@ -62,11 +62,16 @@ BOOL CALLBACK describeChild(HWND window, LPARAM context) {
     GetWindowThreadProcessId(window, &process);
     GetWindowRect(window, &bounds);
     MapWindowPoints(HWND_DESKTOP, report.host, reinterpret_cast<POINT*>(&bounds), 2);
-    report.output << L"  " << name << L" PID=" << process << L" visible="
-        << ((GetWindowLongPtrW(window, GWL_STYLE) & WS_VISIBLE) ? L"yes" : L"no") << L" rect=";
+    const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+    report.output << L"  " << name << L" HWND=0x" << std::hex << reinterpret_cast<ULONG_PTR>(window)
+        << std::dec << L" PID=" << process << L" visible="
+        << ((style & WS_VISIBLE) ? L"yes" : L"no") << L" rect=";
     describeRect(report.output, {bounds.left, bounds.top, bounds.right, bounds.bottom});
     const auto extended = GetWindowLongPtrW(window, GWL_EXSTYLE);
-    report.output << L" exstyle=0x" << std::hex << extended << std::dec;
+    report.output << L" style=0x" << std::hex << style << L" exstyle=0x" << extended
+        << L" GetParent=0x" << reinterpret_cast<ULONG_PTR>(GetParent(window))
+        << L" structuralParent=0x" << reinterpret_cast<ULONG_PTR>(GetAncestor(window, GA_PARENT))
+        << L" owner=0x" << reinterpret_cast<ULONG_PTR>(GetWindow(window, GW_OWNER)) << std::dec;
     if (extended & WS_EX_LAYERED) {
         COLORREF color = 0; BYTE alpha = 0; DWORD flags = 0;
         if (GetLayeredWindowAttributes(window, &color, &alpha, &flags) && (flags & LWA_ALPHA))
@@ -327,6 +332,7 @@ std::wstring TaskbarStatusPanel::diagnostics() const {
     const HWND host = host_ && IsWindow(host_) ? host_ : FindWindowW(L"Shell_TrayWnd", nullptr);
     if (host) {
         DpiScope dpiContext(host);
+        report << L"Taskbar host HWND=0x" << std::hex << reinterpret_cast<ULONG_PTR>(host) << std::dec << L"\n";
         report << L"Taskbar child windows (class/PID/visibility/rectangle only):\n";
         DiagnosticWindows windows{host, report};
         EnumChildWindows(host, describeChild, reinterpret_cast<LPARAM>(&windows));

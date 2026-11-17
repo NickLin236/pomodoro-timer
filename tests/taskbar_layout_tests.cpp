@@ -33,6 +33,25 @@ void screenshotDoesNotCoverTheMonitorBesideWeather() {
     CHECK(!taskbarSlotIsFree({2410, 2, 2590, 58}, strip, 4, widgets));
 }
 
+void reportedDesktopRectanglesPlaceStatusBeforeTheMonitor() {
+    // User's 3840x60 taskbar at 150% scale. The foreign #32770 monitor
+    // occupies 2799..3141; its ReBar parent clips the final two pixels.
+    // Omitting this window had allowed the actual panel at 3070..3247.
+    const TaskbarRect strip{72, 3, 3837, 57};
+    const std::vector<TaskbarRect> occupied{
+        {80, 3, 1555, 57},
+        {2799, 6, 3139, 54},
+        {3253, 0, 3439, 60},
+        {3451, 0, 3840, 60}
+    };
+    const TaskbarRect overlapping{3070, 3, 3247, 57};
+    CHECK(!taskbarSlotIsFree(overlapping, strip, 6, occupied));
+    const auto slot = findTaskbarSlot(strip, 3253 - 6, 177, 54, 6, occupied);
+    CHECK(slot && same(*slot, {2616, 3, 2793, 57}));
+    CHECK(taskbarSlotIsFree(*slot, strip, 6, occupied));
+    CHECK(slot->right + 6 == occupied[1].left);
+}
+
 void clippedAndOversizedChildrenStillOccupyTheStrip() {
     const TaskbarRect strip{0, 0, 1000, 40};
     auto slot = findTaskbarSlot(strip, 900, 150, 36, 4, {{700, -80, 880, 90}});
@@ -206,6 +225,7 @@ void randomizedLayoutsMatchAnIndependentSlotSearch() {
 int main() {
     try {
         screenshotDoesNotCoverTheMonitorBesideWeather();
+        reportedDesktopRectanglesPlaceStatusBeforeTheMonitor();
         clippedAndOversizedChildrenStillOccupyTheStrip();
         overlappingAndReorderedWidgetsHaveOneSafeResult();
         touchingEdgesAndSeparateRowsRespectTheRequestedClearance();
@@ -213,7 +233,7 @@ int main() {
         negativeCoordinatesAndDpiScalingPreserveTheGeometry();
         extremeCoordinatesDoNotOverflow();
         randomizedLayoutsMatchAnIndependentSlotSearch();
-        std::cout << "8 taskbar layout scenarios passed (12,000 randomized layouts)\n";
+        std::cout << "9 taskbar layout scenarios passed (12,000 randomized layouts)\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -74,7 +74,8 @@ bool containerClass(const std::wstring& name) {
 }
 
 bool underTaskList(HWND window, HWND host) {
-    for (HWND current = GetParent(window); current && current != host; current = GetParent(current)) {
+    for (HWND current = GetAncestor(window, GA_PARENT); current && current != host;
+         current = GetAncestor(current, GA_PARENT)) {
         const auto name = className(current);
         if (taskListClass(name) || name == L"MSTaskSwWClass") return true;
     }
@@ -89,9 +90,11 @@ bool clientScreenBounds(HWND window, RECT& result) {
 
 bool clippedDescendantBounds(HWND window, HWND host, const RECT& strip, RECT& result) {
     if (!GetWindowRect(window, &result) || !IntersectRect(&result, &result, &strip)) return false;
-    for (HWND current = window; current && current != host; current = GetParent(current)) {
+    // SetParent does not clear WS_POPUP. Embedded status windows can retain
+    // an unrelated hidden owner, which GetParent returns instead of the host.
+    for (HWND current = window; current && current != host; current = GetAncestor(current, GA_PARENT)) {
         if (!(GetWindowLongPtrW(current, GWL_STYLE) & WS_VISIBLE) || IsIconic(current) || cloaked(current)) return false;
-        HWND parent = GetParent(current);
+        HWND parent = GetAncestor(current, GA_PARENT);
         if (!parent) return false;
         RECT client{};
         if (!clientScreenBounds(parent, client) || !IntersectRect(&result, &result, &client)) return false;
@@ -177,7 +180,7 @@ void postButtonsReady(ButtonState& state, HWND expectedHost) {
     GetClassNameW(state.callback, name, static_cast<int>(std::size(name)));
     if (process == GetCurrentProcessId() &&
         std::wcscmp(name, L"PomodoroNative.TaskbarStatus.v1") == 0 &&
-        GetParent(state.callback) == expectedHost)
+        GetAncestor(state.callback, GA_PARENT) == expectedHost)
         PostMessageW(state.callback, taskbarObstaclesReadyMessage, 0, 0);
 }
 

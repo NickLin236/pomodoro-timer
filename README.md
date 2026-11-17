@@ -8,7 +8,7 @@ Download **Pomodoro.exe** from [the latest release](https://github.com/NickLin23
 
 [Download Pomodoro.exe](https://github.com/NickLin236/pomodoro-timer/releases/latest/download/Pomodoro.exe)
 
-The latest-download link advances after a successful release workflow. Version **1.2.3** corrects accessibility and background-container cases that could keep taskbar status hidden, and adds a visible version label plus copyable taskbar diagnostics. Notifications retain timer-specific text and Dismiss/Stop actions. Releases contain the standalone executable, an optional ZIP with install scripts/documentation, and SHA-256 checksums. See the [changelog](CHANGELOG.md) and [release steps](Docs/GitHub_Releases.md).
+The latest-download link advances after a successful release workflow. Version **1.2.4** corrects occupied-space checks for reparented popup widgets such as Traffic Monitor. Settings retains the running version label and copyable taskbar diagnostics. Notifications retain timer-specific text and Dismiss/Stop actions. Releases contain the standalone executable, an optional ZIP with install scripts/documentation, and SHA-256 checksums. See the [changelog](CHANGELOG.md) and [release steps](Docs/GitHub_Releases.md).
 
 ## Build on Windows
 
@@ -61,7 +61,7 @@ With CMake 3.21+, `cmake --preset portable`, `cmake --build --preset portable`, 
 
 The five portable suites include 25,000 deterministic randomized engine command steps, 12,000 taskbar layouts compared with an independent slot search, and checks for timer recovery, durable storage, notification content/actions, and migration of the taskbar-status preference. Reset regressions cover the final-break → countdown → new Pomodoro sequence and reset exactly at a phase boundary. Windows builds add a `taskbar_obstacles` regression suite for accessibility variants and a `windows_ui` test that drives real native settings commands against an isolated registry key, exercises private taskbar fixtures, and checks that Close destroys the window after saving. It requires a Windows desktop and leaves the real startup entry untouched. Each CTest case has a 30-second timeout. The [validation record](Docs/Validation.md) distinguishes completed checks from the remaining Windows checks.
 
-If taskbar status is still missing, exit the previous copy, open the new executable, and confirm **Pomodoro 1.2.3** in Settings. Start a timer, choose **Copy taskbar diagnostics**, then paste the report into the bug report. It includes the application version/path, timer preference/state, placement reason, and taskbar window classes/PIDs/rectangles. It does not collect other window titles or contents.
+If taskbar status is missing or overlaps another program, exit the previous copy, open the new executable, and confirm **Pomodoro 1.2.4** in Settings. Start a timer, choose **Copy taskbar diagnostics**, then paste the report into the bug report. It includes the application version/path, timer preference/state, placement reason, and taskbar window classes/PIDs/rectangles, styles, and parent/owner relationships. It does not collect other window titles or contents.
 
 ## Verification status
 

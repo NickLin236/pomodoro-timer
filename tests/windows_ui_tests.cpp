@@ -105,6 +105,7 @@ private:
 constexpr UINT syntheticPanelCallback = WM_APP + 80;
 constexpr wchar_t syntheticTaskbarProperty[] = L"PomodoroNative.SyntheticTaskbar";
 constexpr wchar_t foreignTaskbarClass[] = L"PomodoroNative.ForeignTaskbarTest";
+constexpr wchar_t foreignPopupTaskbarClass[] = L"PomodoroNative.ForeignPopupTaskbarTest";
 constexpr UINT foreignRemoveContents = WM_APP + 81;
 
 struct PanelCallbacks {
@@ -199,7 +200,7 @@ LRESULT CALLBACK foreignTaskbarProcedure(HWND window, UINT message, WPARAM wPara
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-int foreignTaskbarHelper(int count, char** arguments, bool container = false) {
+int foreignTaskbarHelper(int count, char** arguments, bool container = false, bool popup = false) {
     if (count != 4) return 2;
     const HWND parent = reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(arguments[2])));
     DWORD parentProcess = 0;
@@ -215,17 +216,31 @@ int foreignTaskbarHelper(int count, char** arguments, bool container = false) {
     WNDCLASSW type{};
     type.hInstance = GetModuleHandleW(nullptr);
     type.lpfnWndProc = foreignTaskbarProcedure;
-    type.lpszClassName = container ? L"WorkerW" : foreignTaskbarClass;
+    type.lpszClassName = popup ? foreignPopupTaskbarClass : (container ? L"WorkerW" : foreignTaskbarClass);
     if (!RegisterClassW(&type)) return 6;
     // Leave the system caption cache empty. A foreign GetWindowText call sees
     // no caption, while a bounded WM_GETTEXT request reaches the custom text.
     RECT client{};
     if (!GetClientRect(parent, &client)) return 7;
+    // Traffic Monitor creates an owned popup and reparents it into Explorer
+    // without changing WS_POPUP. Keep its hidden owner to exercise that path.
+    HWND owner = nullptr;
+    if (popup) {
+        owner = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"Hidden monitor owner",
+            WS_POPUP, -32000, -32000, 100, 100, nullptr, nullptr, type.hInstance, nullptr);
+        if (!owner) return 7;
+    }
     HWND child = CreateWindowExW(WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE,
-        type.lpszClassName, L"", WS_CHILD | WS_VISIBLE,
+        type.lpszClassName, L"", popup ? WS_POPUP : (WS_CHILD | WS_VISIBLE),
         container ? 0 : 420, 0, container ? client.right : 150,
-        container ? client.bottom : 46, parent, nullptr, type.hInstance, nullptr);
+        container ? client.bottom : 46, popup ? owner : parent, nullptr, type.hInstance, nullptr);
     if (!child) return 7;
+    if (popup) {
+        SetParent(child, parent);
+        if (GetAncestor(child, GA_PARENT) != parent || GetParent(child) == parent ||
+            !(GetWindowLongPtrW(child, GWL_STYLE) & WS_POPUP) ||
+            !SetWindowPos(child, nullptr, 550, 4, 152, 38, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)) return 8;
+    }
     if (container) {
         const DWORD exStyle = WS_EX_NOPARENTNOTIFY | WS_EX_NOACTIVATE;
         if (!CreateWindowExW(exStyle, L"STATIC", L"Foreign left control", WS_CHILD | WS_VISIBLE,
@@ -238,6 +253,7 @@ int foreignTaskbarHelper(int count, char** arguments, bool container = false) {
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message); DispatchMessageW(&message);
     }
+    if (owner) DestroyWindow(owner);
     return 0;
 }
 
@@ -264,8 +280,8 @@ DWORD waitForTestObject(HANDLE object, DWORD timeout) {
 
 class ForeignTaskbarChild {
 public:
-    explicit ForeignTaskbarChild(HWND host, bool container = false)
-        : host_(host), class_(container ? L"WorkerW" : foreignTaskbarClass) {
+    explicit ForeignTaskbarChild(HWND host, bool container = false, bool popup = false)
+        : host_(host), class_(popup ? foreignPopupTaskbarClass : (container ? L"WorkerW" : foreignTaskbarClass)) {
         static unsigned serial = 0;
         const auto name = L"Local\\PomodoroNative.ForeignTaskbarTest." + std::to_wstring(GetCurrentProcessId()) +
             L"." + std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(++serial);
@@ -275,7 +291,8 @@ public:
         const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
         require(length != 0 && length < executable.size(), "Could not locate foreign taskbar test executable");
         auto command = L"\"" + std::wstring(executable.data(), length) +
-            (container ? L"\" --synthetic-taskbar-container " : L"\" --synthetic-taskbar-child ") +
+            (popup ? L"\" --synthetic-taskbar-popup " :
+             (container ? L"\" --synthetic-taskbar-container " : L"\" --synthetic-taskbar-child ")) +
             std::to_wstring(reinterpret_cast<UINT_PTR>(host_)) + L" " + name;
         STARTUPINFOW startup{}; startup.cb = sizeof(startup);
         PROCESS_INFORMATION process{};
@@ -467,6 +484,40 @@ void taskbarStatusUsesOnlyItsSyntheticHost() {
             require(!panel.available() && !IsWindowVisible(panelWindow),
                     "Foreign leaf host was incorrectly treated as empty structural background");
         }
+
+        // A reparented WS_POPUP is a real descendant even though GetParent
+        // reports its hidden owner. Its whole visible body must remain clear.
+        ShowWindow(host.monitorContainer, SW_HIDE);
+        {
+            HWND rebar = CreateWindowExW(0, REBARCLASSNAMEW, L"Synthetic monitor rebar",
+                WS_CHILD | WS_VISIBLE | CCS_NODIVIDER | CCS_NOPARENTALIGN | CCS_NORESIZE,
+                200, 0, 700, 46, host.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+            require(rebar != nullptr, "Could not create synthetic monitor rebar");
+            require(SetPropW(rebar, syntheticTaskbarProperty,
+                reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GetCurrentProcessId()))) != FALSE,
+                "Could not mark synthetic monitor rebar");
+            {
+                ForeignTaskbarChild popup(rebar, false, true);
+                const auto monitor = screenBounds(popup.window);
+                const auto rebarClient = clientScreenBounds(rebar);
+                require(GetAncestor(popup.window, GA_PARENT) == rebar && GetParent(popup.window) != rebar,
+                        "Foreign popup did not retain separate structural parent and owner");
+                require((GetWindowLongPtrW(popup.window, GWL_STYLE) & WS_POPUP) != 0,
+                        "Foreign monitor popup unexpectedly changed to WS_CHILD");
+                require(monitor.right > rebarClient.right, "Foreign popup did not exercise ancestor clipping");
+                const auto snapshot = collectTaskbarObstacles(host.window, panel.handle(), false);
+                require(std::any_of(snapshot.occupied.begin(), snapshot.occupied.end(), [&](const TaskbarRect& rectangle) {
+                    return rectangle.left == monitor.left - hostClient.left &&
+                        rectangle.right == rebarClient.right - hostClient.left;
+                }), "Foreign owned popup was omitted or clipped against its owner instead of its rebar");
+                panel.update(L"Focus 24:58", L"Cycle 2 / 4", true);
+                require(panel.available() && screenBounds(panelWindow).right <= monitor.left - 2,
+                        "Status panel overlapped a reparented foreign monitor popup");
+                requireSameBounds(popup.window, monitor, "Status panel moved the foreign monitor popup");
+            }
+            DestroyWindow(rebar);
+        }
+        ShowWindow(host.monitorContainer, SW_SHOWNOACTIVATE);
 
         // Reproduce the screenshot's adjacent weather widget. No caption or
         // hard-coded weather-class rule is needed to keep compact widgets clear.
@@ -780,9 +831,11 @@ int main(int count, char** arguments) {
             return foreignTaskbarHelper(count, arguments);
         if (count > 1 && std::string(arguments[1]) == "--synthetic-taskbar-container")
             return foreignTaskbarHelper(count, arguments, true);
+        if (count > 1 && std::string(arguments[1]) == "--synthetic-taskbar-popup")
+            return foreignTaskbarHelper(count, arguments, false, true);
         ComLifetime com;
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
-        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_COOL_CLASSES};
         require(InitCommonControlsEx(&controls) != FALSE, "Could not initialize native controls");
         notificationXmlUsesWindowsRuntimeWithoutSending();
         taskbarStatusUsesOnlyItsSyntheticHost();
