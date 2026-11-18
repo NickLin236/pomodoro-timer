@@ -20,7 +20,7 @@ The repository already contains the application and release workflows. From its 
 
 ```powershell
 git add .gitignore CMakeLists.txt README.md CHANGELOG.md Docs include src tests resources packaging .github
-git commit -m "Release 1.2.5 with security hardening"
+git commit -m "Fix 1.2.6 release metadata"
 git push origin main
 ```
 
@@ -28,22 +28,37 @@ Keep the existing Git history and `origin` remote. If GitHub authentication is u
 
 GitHub runs the CI workflow for the push. It builds with MSVC on Windows x64, runs the automated tests, and keeps build artifacts on the workflow run. Verify the new commit passes before publishing its tag. A successful branch CI run alone does not create a release.
 
-## Publish version 1.2.5
+## Publish version 1.2.6
 
-After the version 1.2.5 commit is pushed and its CI checks pass:
+After the version 1.2.6 commit is pushed and its CI checks pass:
+
+If the tag already exists from the failed run, use the recovery commands below instead of creating it again.
 
 ```powershell
-git tag v1.2.5
-git push origin v1.2.5
+git tag v1.2.6
+git push origin v1.2.6
 ```
 
-The release workflow verifies executable protections and checks that the tag matches the CMake, resource, and manifest versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes `Pomodoro.exe`, `Pomodoro-1.2.5-windows-x64.zip`, `BUILDINFO.json`, and `SHA256SUMS.txt`. `BUILDINFO.json` identifies the exact source commit used for the executable.
+The release workflow verifies executable protections and checks that the tag matches the CMake, resource, and manifest versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes `Pomodoro.exe`, `Pomodoro-1.2.6-windows-x64.zip`, `BUILDINFO.json`, and `SHA256SUMS.txt`. `BUILDINFO.json` identifies the exact source commit used for the executable.
 
-Watch **Actions → Release** in the repository for build/test results. After the workflow succeeds, open [release v1.2.5](https://github.com/NickLin236/pomodoro-timer/releases/tag/v1.2.5) and download `Pomodoro.exe`. The top-level README's latest-download link will then point to that release. The version-specific page is available only after publication. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
+Watch **Actions → Release** in the repository for build/test results. After the workflow succeeds, open [release v1.2.6](https://github.com/NickLin236/pomodoro-timer/releases/tag/v1.2.6) and download `Pomodoro.exe`. The top-level README's latest-download link will then point to that release. The version-specific page is available only after publication. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
 
-Version 1.2.5 adds random notification session IDs, explicit executable protections, and CI checks of the actual PE metadata. See [the security review](Security_Review.md) and [changelog](../CHANGELOG.md) for findings and validation limits. Do not replace the older release's executable or move its tag to publish these changes.
+Version 1.2.6 adds the saved sound-volume control and aligns release metadata. Adjusted-volume playback is still pending integration; see the [changelog](../CHANGELOG.md) for the current scope. Keep older published releases and their tags fixed.
 
 For later versions, update `project(Pomodoro VERSION ...)` in `CMakeLists.txt`, the file/product versions in `resources/pomodoro.rc`, and the assembly version in `resources/pomodoro.manifest`. Add a matching `## X.Y.Z` section to `CHANGELOG.md`; the release workflow uses that section as its published notes. Commit and push the changes, then push the matching new `vX.Y.Z` tag. Keep published release tags fixed.
+
+## Recover the failed v1.2.6 tag
+
+The original `v1.2.6` tag points to commit `7a29d827fcdc74dad86f8cbae49a2eabeb987a29`, whose CMake version is still 1.2.5. Rerunning that workflow rebuilds the same old commit. Commit and push the corrected metadata first, then wait for branch CI to pass.
+
+Only if `v1.2.6` has never been published, update that failed tag from the corrected commit:
+
+```powershell
+git tag -f v1.2.6
+git push --force-with-lease=refs/tags/v1.2.6:7a29d827fcdc74dad86f8cbae49a2eabeb987a29 origin refs/tags/v1.2.6
+```
+
+The lease rejects the push if someone has changed the remote tag. If a release has already been published, keep its tag fixed and use a new version with matching CMake/resource/manifest/changelog metadata instead.
 
 ## Upload an already-built executable manually
 

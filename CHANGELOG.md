@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.6 — November 18, 2026
+
+- Add a Settings sound-volume slider with a live 0–200% display. Disabling notification sound disables the slider while preserving its value.
+- Save and validate the volume preference, with a default of 100% for older settings files.
+- Add settings compatibility, range, persistence, and native UI regressions, plus prepared audio-gain helpers and tests.
+- Align CMake, Windows file/product resources, and the application manifest with the `v1.2.6` release tag.
+
+Adjusted-volume playback is not connected yet; notification audio still uses Windows-managed sound. The prepared playback path needs a choice about Focus assist behavior before integration. This version adds the control and saved preference without claiming an effective volume boost.
+
 ## 1.2.5 — November 18, 2026
 
 - Generate new notification session IDs from 128 bits of operating-system entropy instead of predictable timestamps and counters. Starting a timer fails safely if secure randomness is unavailable; existing saved sessions remain readable.

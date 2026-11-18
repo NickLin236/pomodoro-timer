@@ -1,8 +1,10 @@
 # Validation record
 
-Initial implementation: November 9, 2026. Version 1.1.0 update: November 10, 2026. Version 1.2.0 update: November 11, 2026. Version 1.2.1 update: November 11, 2026. Version 1.2.2 update: November 12, 2026. Version 1.2.3 update: November 17, 2026. Version 1.2.4 update: November 17, 2026. Version 1.2.5 update: November 18, 2026.
+Initial implementation: November 9, 2026. Version 1.1.0 update: November 10, 2026. Version 1.2.0 update: November 11, 2026. Version 1.2.1 update: November 11, 2026. Version 1.2.2 update: November 12, 2026. Version 1.2.3 update: November 17, 2026. Version 1.2.4 update: November 17, 2026. Version 1.2.5 update: November 18, 2026. Version 1.2.6 metadata correction: November 18, 2026.
 
 The development environment is Linux with GCC 9.4 and CMake 3.16.3. This environment cannot demonstrate Windows 10 desktop integration or measure the target application's runtime resource usage.
+
+Version 1.2.6 aligns CMake, Windows file/product version resources, the manifest and changelog with the release tag after the original tagged commit still declared 1.2.5. Equivalent workflow version checks pass for `v1.2.6`. All five portable suites pass (1.03 seconds); the Windows application and seven native test executables cross-compile and pass PE protection checks. The application contains the updated manifest and version strings. Native Windows tests were not executed here. The volume control and persisted preference are present, while adjusted-volume playback remains unconnected. Retargeting the failed unpublished tag requires a new push event; rerunning its original workflow does not use this corrected source.
 
 Version 1.2.5 adds security hardening after a source-assisted local penetration assessment. The earlier local MinGW executable lacked ASLR flags and relocation data; this was a confirmed mitigation gap, not a demonstrated exploitation chain. New notification sessions use OS-generated random 128-bit IDs, and entropy failure does not start a timer or overwrite state. Explicit Windows linker options enable ASLR/high-entropy/NX metadata and relocations; MSVC also restricts implicit DLL search. CI verifies those properties on the actual executable and seven native test binaries before testing and packaging.
 

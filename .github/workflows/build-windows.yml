@@ -46,7 +46,7 @@ jobs:
           if (-not $match.Success) { throw 'Cannot read application version from CMakeLists.txt.' }
           $version = $match.Groups[1].Value
           if ($env:RELEASE_TAG -and $env:RELEASE_TAG -cne "v$version") {
-            throw "Release tag must be v$version to match CMakeLists.txt."
+            throw "Release tag '$env:RELEASE_TAG' does not match source version '$version'. Update CMakeLists.txt, resources/pomodoro.rc, resources/pomodoro.manifest, and CHANGELOG.md, then push the matching tag at that corrected commit. Expected tag: v$version."
           }
           $resources = Get-Content resources/pomodoro.rc -Raw
           $numericVersion = $version.Replace('.', ',') + ',0'
