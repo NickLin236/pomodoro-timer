@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Pomodoro VERSION 1.2.4 LANGUAGES CXX)
+project(Pomodoro VERSION 1.2.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ add_library(pomodoro_core
     src/persistence/state_store.cpp
     src/app/controller.cpp
     src/app/notifications.cpp
+    src/platform/session_id.cpp
     src/platform/taskbar_layout.cpp)
 target_include_directories(pomodoro_core PUBLIC include)
 if(WIN32)
@@ -27,6 +28,18 @@ endif()
 
 if(WIN32)
     enable_language(RC)
+    # Keep release protection independent of toolchain defaults. Older MinGW
+    # linkers otherwise produce a fixed-base executable without relocations.
+    function(pomodoro_harden_windows_executable target)
+        if(MSVC)
+            target_link_options(${target} PRIVATE /DYNAMICBASE /HIGHENTROPYVA
+                /NXCOMPAT /FIXED:NO /DEPENDENTLOADFLAG:0x800)
+        elseif(MINGW)
+            target_link_options(${target} PRIVATE
+                -Wl,--dynamicbase,--high-entropy-va,--nxcompat,--enable-reloc-section)
+        endif()
+    endfunction()
+
     # Native UI executables must share the Common Controls v6 activation
     # context, including tests. An unmanifested test defaults to Comctl32 v5.
     function(pomodoro_embed_windows_resources target)
@@ -44,6 +57,7 @@ if(WIN32)
         src/platform/taskbar_obstacles.cpp
         src/platform/taskbar_status_panel.cpp)
     pomodoro_embed_windows_resources(Pomodoro)
+    pomodoro_harden_windows_executable(Pomodoro)
     target_link_libraries(Pomodoro PRIVATE pomodoro_core comctl32 shell32 ole32
         uuid advapi32 user32 gdi32 oleacc oleaut32)
     target_compile_definitions(Pomodoro PRIVATE UNICODE _UNICODE
@@ -57,7 +71,7 @@ if(WIN32)
     install(TARGETS Pomodoro RUNTIME DESTINATION .)
     install(FILES README.md CHANGELOG.md Pomodoro_Development_Plan.md DESTINATION .)
     install(FILES Docs/Behavior.md Docs/Windows_Test_Checklist.md Docs/Validation.md
-        Docs/GitHub_Releases.md DESTINATION Docs)
+        Docs/GitHub_Releases.md Docs/Security_Review.md DESTINATION Docs)
     install(PROGRAMS packaging/Install.ps1 packaging/Uninstall.ps1 packaging/Measure-Resources.ps1 DESTINATION .)
     set(CPACK_GENERATOR ZIP)
     set(CPACK_PACKAGE_FILE_NAME "Pomodoro-${PROJECT_VERSION}-windows-x64")
@@ -71,6 +85,9 @@ if(BUILD_TESTING)
     foreach(suite IN ITEMS timer_engine state_store controller notifications taskbar_layout)
         add_executable(${suite}_tests tests/${suite}_tests.cpp)
         target_link_libraries(${suite}_tests PRIVATE pomodoro_core)
+        if(WIN32)
+            pomodoro_harden_windows_executable(${suite}_tests)
+        endif()
         add_test(NAME ${suite} COMMAND ${suite}_tests)
         set_tests_properties(${suite} PROPERTIES TIMEOUT 30)
     endforeach()
@@ -81,6 +98,7 @@ if(BUILD_TESTING)
             src/platform/taskbar_obstacles.cpp
             src/platform/taskbar_status_panel.cpp)
         pomodoro_embed_windows_resources(windows_ui_tests)
+        pomodoro_harden_windows_executable(windows_ui_tests)
         target_link_libraries(windows_ui_tests PRIVATE pomodoro_core comctl32 shell32
             ole32 uuid advapi32 user32 gdi32 oleacc oleaut32)
         target_compile_definitions(windows_ui_tests PRIVATE UNICODE _UNICODE
@@ -96,6 +114,7 @@ if(BUILD_TESTING)
 
         add_executable(taskbar_obstacles_tests tests/taskbar_obstacles_tests.cpp)
         pomodoro_embed_windows_resources(taskbar_obstacles_tests)
+        pomodoro_harden_windows_executable(taskbar_obstacles_tests)
         target_link_libraries(taskbar_obstacles_tests PRIVATE pomodoro_core oleacc oleaut32 ole32 uuid user32)
         target_compile_definitions(taskbar_obstacles_tests PRIVATE UNICODE _UNICODE
             _WIN32_WINNT=0x0A00 WINVER=0x0A00)

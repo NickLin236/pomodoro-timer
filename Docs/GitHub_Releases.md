@@ -19,8 +19,8 @@ Upload only the project source, resources, tests, docs, CMake files, and `.githu
 The repository already contains the application and release workflows. From its existing working checkout, commit and push the new version's source and documentation:
 
 ```powershell
-git add CMakeLists.txt README.md CHANGELOG.md Docs include src tests resources packaging .github
-git commit -m "Release 1.2.4 with popup-widget taskbar placement fix"
+git add .gitignore CMakeLists.txt README.md CHANGELOG.md Docs include src tests resources packaging .github
+git commit -m "Release 1.2.5 with security hardening"
 git push origin main
 ```
 
@@ -28,20 +28,20 @@ Keep the existing Git history and `origin` remote. If GitHub authentication is u
 
 GitHub runs the CI workflow for the push. It builds with MSVC on Windows x64, runs the automated tests, and keeps build artifacts on the workflow run. Verify the new commit passes before publishing its tag. A successful branch CI run alone does not create a release.
 
-## Publish version 1.2.4
+## Publish version 1.2.5
 
-After the version 1.2.4 commit is pushed and its CI checks pass:
+After the version 1.2.5 commit is pushed and its CI checks pass:
 
 ```powershell
-git tag v1.2.4
-git push origin v1.2.4
+git tag v1.2.5
+git push origin v1.2.5
 ```
 
-The release workflow checks that the tag matches the CMake, resource, and manifest versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes `Pomodoro.exe`, `Pomodoro-1.2.4-windows-x64.zip`, `BUILDINFO.json`, and `SHA256SUMS.txt`. `BUILDINFO.json` identifies the exact source commit used for the executable.
+The release workflow verifies executable protections and checks that the tag matches the CMake, resource, and manifest versions, builds the Windows Release executable with the static CRT, and runs the tests. It publishes a GitHub release only after the checks succeed. The release includes `Pomodoro.exe`, `Pomodoro-1.2.5-windows-x64.zip`, `BUILDINFO.json`, and `SHA256SUMS.txt`. `BUILDINFO.json` identifies the exact source commit used for the executable.
 
-Watch **Actions → Release** in the repository for build/test results. After the workflow succeeds, open [release v1.2.4](https://github.com/NickLin236/pomodoro-timer/releases/tag/v1.2.4) and download `Pomodoro.exe`. The top-level README's latest-download link will then point to that release. The version-specific page is available only after publication. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
+Watch **Actions → Release** in the repository for build/test results. After the workflow succeeds, open [release v1.2.5](https://github.com/NickLin236/pomodoro-timer/releases/tag/v1.2.5) and download `Pomodoro.exe`. The top-level README's latest-download link will then point to that release. The version-specific page is available only after publication. A GitHub-hosted Windows build does not replace the real Windows 10 shell/performance checklist in this repository.
 
-Version 1.2.4 corrects structural-parent traversal for reparented popup widgets, including the Traffic Monitor rectangle omitted in the supplied overlap report. Settings retains the version label and taskbar diagnostics, with parent/owner details. See [the changelog](../CHANGELOG.md) for validation and placement limits. Do not replace the older release's executable or move its tag to publish these changes.
+Version 1.2.5 adds random notification session IDs, explicit executable protections, and CI checks of the actual PE metadata. See [the security review](Security_Review.md) and [changelog](../CHANGELOG.md) for findings and validation limits. Do not replace the older release's executable or move its tag to publish these changes.
 
 For later versions, update `project(Pomodoro VERSION ...)` in `CMakeLists.txt`, the file/product versions in `resources/pomodoro.rc`, and the assembly version in `resources/pomodoro.manifest`. Add a matching `## X.Y.Z` section to `CHANGELOG.md`; the release workflow uses that section as its published notes. Commit and push the changes, then push the matching new `vX.Y.Z` tag. Keep published release tags fixed.
 

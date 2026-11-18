@@ -3,10 +3,12 @@
 #include <chrono>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace pomodoro {
 
-Controller::Controller(StateStore& store, Clock& clock) : store_(store), clock_(clock) {}
+Controller::Controller(StateStore& store, Clock& clock, SessionEntropySource entropy)
+    : store_(store), clock_(clock), entropy_(std::move(entropy)) {}
 
 Update Controller::load() {
     auto settings = store_.loadPreferences();
@@ -74,20 +76,36 @@ Update Controller::poll(bool recovering) {
 }
 
 std::string Controller::newSessionId() {
-    // Time plus per-process counter is sufficient to distinguish this single
-    // instance's sessions; event sequences are scoped by the saved session ID.
-    return std::to_string(now_) + "-" + std::to_string(++sessionCounter_);
+    // Notification Stop links are public protocol activations, so the session
+    // identifier is also an unguessable capability rather than a timestamp.
+    return encodeSessionId(entropy_());
 }
 
 bool Controller::startPomodoro(const PomodoroConfig& config) {
-    if (!engine_.startPomodoro(config, now_, newSessionId())) return false;
+    if (!validateConfig(config) || engine_.pomodoro.status == Status::Running ||
+        engine_.pomodoro.status == Status::Paused) return false;
+    std::string session;
+    try { session = newSessionId(); }
+    catch (const std::exception& error) {
+        warning_ = std::string("Could not create a secure timer session: ") + error.what();
+        return false;
+    }
+    if (!engine_.startPomodoro(config, now_, session)) return false;
     pomodoroAttempt_ = 0;
     save();
     return true;
 }
 
 bool Controller::startCountdown(Millis duration) {
-    if (!engine_.startCountdown(duration, now_, newSessionId())) return false;
+    if (!validateDuration(duration) || engine_.countdown.status == Status::Running ||
+        engine_.countdown.status == Status::Paused) return false;
+    std::string session;
+    try { session = newSessionId(); }
+    catch (const std::exception& error) {
+        warning_ = std::string("Could not create a secure timer session: ") + error.what();
+        return false;
+    }
+    if (!engine_.startCountdown(duration, now_, session)) return false;
     countdownAttempt_ = 0;
     save();
     return true;

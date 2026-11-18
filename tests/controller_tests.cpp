@@ -1,9 +1,12 @@
 #include "pomodoro/controller.h"
+#include "pomodoro/notifications.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -497,6 +500,115 @@ void resetAtPhaseBoundaryRetainsOnlyNewSessionEvents() {
     CHECK(controller.warning().empty());
 }
 
+void sessionCapabilitiesUseOsEntropyAndSurviveRestart() {
+    SessionEntropy fixture{};
+    for (std::size_t i = 0; i < fixture.size(); ++i) fixture[i] = static_cast<unsigned char>(i * 17);
+    CHECK(encodeSessionId(fixture) == "00112233445566778899aabbccddeeff");
+
+    TemporaryDirectory files;
+    StateStore store(files.path);
+    auto clock = clockAtLaunch();
+    Controller controller(store, clock);
+    (void)controller.load();
+    std::set<std::string> observed;
+    const auto remember = [&observed](const std::string& id) {
+        CHECK(id.size() == 32);
+        CHECK(std::all_of(id.begin(), id.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }));
+        CHECK(observed.insert(id).second);
+    };
+    CHECK(controller.startPomodoro({5'000, 1'000, 1}));
+    const auto pomodoroId = controller.engine().pomodoro.sessionId;
+    remember(pomodoroId);
+    // The clock never advances. This is a regression check for accidentally
+    // reintroducing timestamps/counters, not a statistical proof of entropy.
+    for (unsigned i = 0; i < 16; ++i) {
+        CHECK(controller.startCountdown(5'000));
+        remember(controller.engine().countdown.sessionId);
+        controller.resetCountdown();
+    }
+    CHECK(controller.startCountdown(5'000));
+    const auto countdownId = controller.engine().countdown.sessionId;
+    remember(countdownId);
+    Controller restarted(store, clock);
+    (void)restarted.load();
+    CHECK(restarted.engine().pomodoro.sessionId == pomodoroId);
+    CHECK(restarted.engine().countdown.sessionId == countdownId);
+    CHECK(matchesNotificationSession(restarted.engine(),
+        {NotificationCommand::Stop, TimerKind::Countdown, countdownId}));
+    CHECK(!matchesNotificationSession(restarted.engine(),
+        {NotificationCommand::Stop, TimerKind::Countdown, pomodoroId}));
+    restarted.resetCountdown();
+    CHECK(restarted.startCountdown(5'000));
+    remember(restarted.engine().countdown.sessionId);
+    CHECK(!matchesNotificationSession(restarted.engine(),
+        {NotificationCommand::Stop, TimerKind::Countdown, countdownId}));
+}
+
+void entropyFailureDoesNotStartOrOverwriteTimers() {
+    TemporaryDirectory files;
+    StateStore store(files.path);
+    auto clock = clockAtLaunch();
+    bool reject = false;
+    unsigned requests = 0;
+    Controller controller(store, clock, [&] {
+        ++requests;
+        if (reject) throw std::runtime_error("injected entropy failure");
+        SessionEntropy fixture{};
+        fixture[0] = static_cast<unsigned char>(requests);
+        return fixture;
+    });
+    (void)controller.load();
+    CHECK(controller.startPomodoro({5'000, 1'000, 1}));
+    const auto id = controller.engine().pomodoro.sessionId;
+    const auto savedBefore = store.loadState().value;
+    const auto readState = [&] {
+        std::ifstream input(files.path / "state.json", std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const auto before = readState();
+    CHECK(!before.empty());
+    reject = true;
+    CHECK(!controller.startPomodoro({5'000, 1'000, 1})); // Already active: no entropy request.
+    CHECK(!controller.startCountdown(0));
+    CHECK(requests == 1);
+    CHECK(!controller.startCountdown(5'000));
+    CHECK(requests == 2);
+    CHECK(controller.warning().find("secure timer session") != std::string::npos);
+    CHECK(controller.warning().find("injected entropy failure") != std::string::npos);
+    CHECK(controller.engine().pomodoro.sessionId == id);
+    CHECK(controller.engine().pomodoro.status == Status::Running);
+    CHECK(controller.engine().countdown.status == Status::Idle);
+    CHECK(store.loadState().value.pomodoro.deadlineUtcMs == savedBefore.pomodoro.deadlineUtcMs);
+    CHECK(readState() == before);
+    controller.resetPomodoro();
+    const auto reset = readState();
+    CHECK(!controller.startPomodoro({5'000, 1'000, 1}));
+    CHECK(requests == 3);
+    CHECK(controller.engine().pomodoro.status == Status::Idle);
+    CHECK(controller.engine().pomodoro.sessionId.empty());
+    CHECK(readState() == reset);
+}
+
+void legacySessionIdsRemainReadable() {
+    TemporaryDirectory files;
+    StateStore store(files.path);
+    auto clock = clockAtLaunch();
+    Controller initial(store, clock);
+    (void)initial.load();
+    CHECK(initial.startCountdown(5'000));
+    auto saved = store.loadState().value;
+    saved.countdown.sessionId = "1700000000000-1";
+    store.saveState(saved);
+    Controller restored(store, clock);
+    CHECK(restored.load().events.empty());
+    CHECK(restored.engine().countdown.status == Status::Running);
+    CHECK(restored.engine().countdown.sessionId == saved.countdown.sessionId);
+    CHECK(restored.engine().countdownRemaining(restored.now()) == 5'000);
+    CHECK(restored.warning().empty());
+}
+
 } // namespace
 
 int main() {
@@ -516,7 +628,10 @@ int main() {
         commandsUseOneSampledClockTransaction();
         resetDuringFinalBreakDoesNotSuppressLaterSessions();
         resetAtPhaseBoundaryRetainsOnlyNewSessionEvents();
-        std::cout << "15 controller scenarios passed\n";
+        sessionCapabilitiesUseOsEntropyAndSurviveRestart();
+        entropyFailureDoesNotStartOrOverwriteTimers();
+        legacySessionIdsRemainReadable();
+        std::cout << "18 controller scenarios passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

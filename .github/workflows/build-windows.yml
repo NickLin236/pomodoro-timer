@@ -78,6 +78,13 @@ jobs:
       - name: Build Release application and tests
         run: cmake --build --preset windows-release --parallel
 
+      - name: Verify executable security protections
+        run: |
+          $executables = Get-ChildItem build/windows-msvc/Release/*.exe | ForEach-Object { $_.FullName }
+          if ($executables.Count -ne 8) { throw 'Expected the application and seven test executables.' }
+          python packaging/verify_pe.py --require-system32-imports @executables
+          if ($LASTEXITCODE -ne 0) { throw 'Executable protection checks failed.' }
+
       - name: Run all Windows test suites
         run: ctest --preset windows-release
 

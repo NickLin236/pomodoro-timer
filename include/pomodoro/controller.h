@@ -2,6 +2,7 @@
 
 #include "pomodoro/clock.h"
 #include "pomodoro/state_store.h"
+#include "pomodoro/session_id.h"
 #include <string>
 #include <vector>
 
@@ -16,7 +17,8 @@ struct Update {
 // sampled time, so one clock sample drives each message-loop transaction.
 class Controller {
 public:
-    Controller(StateStore& store, Clock& clock);
+    Controller(StateStore& store, Clock& clock,
+        SessionEntropySource entropy = secureSessionEntropy);
     Update load();
     Update poll(bool recovering = false);
     bool startPomodoro(const PomodoroConfig& config);
@@ -40,6 +42,7 @@ private:
     std::string newSessionId();
     StateStore& store_;
     Clock& clock_;
+    SessionEntropySource entropy_;
     TimerEngine engine_;
     Preferences preferences_;
     ClockSample anchor_{};
@@ -47,7 +50,6 @@ private:
     Millis lastPollMonotonic_ = 0;
     std::uint64_t pomodoroAttempt_ = 0;
     std::uint64_t countdownAttempt_ = 0;
-    std::uint64_t sessionCounter_ = 0;
     std::string warning_;
     bool sampled_ = false;
     bool clockShifted_ = false;

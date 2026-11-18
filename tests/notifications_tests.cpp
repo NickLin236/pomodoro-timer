@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -160,6 +161,53 @@ void onlyExactApplicationUrisAreAccepted() {
     CHECK(parseNotificationAction(L"pomodoro-native://stop/countdown/" + std::wstring(96, L'a')));
 }
 
+void hostileProtocolInputsCannotChangeTheAcceptedCommand() {
+    const std::wstring original = L"pomodoro-native://stop/pomodoro/Ab9-42";
+    // Insert dangerous characters at every boundary, including embedded NULs
+    // and unpaired UTF-16 surrogates. No prefix-only or decoded match is valid.
+    const std::vector<wchar_t> forbidden{
+        L'\0', L'\r', L'\n', L'\t', L' ', L'\"', L'\'', L'%', L'?', L'#', L'\\',
+        L'&', L'<', L'>', static_cast<wchar_t>(0xd800), static_cast<wchar_t>(0xdc00), L'\u4e2d'
+    };
+    for (const auto c : forbidden) {
+        for (std::size_t at = 0; at <= original.size(); ++at) {
+            auto input = original;
+            input.insert(input.begin() + static_cast<std::ptrdiff_t>(at), c);
+            CHECK(!parseNotificationAction(input));
+        }
+    }
+    CHECK(!parseNotificationAction(original + std::wstring(1024 * 1024, L'a')));
+
+    // Reproducible mutations exercise both rejection and valid-token changes.
+    // Every accepted result must reconstruct the complete original input;
+    // normalization, hidden suffixes and argument injection cannot disappear.
+    std::mt19937 random(0x53454355u);
+    for (int trial = 0; trial < 20'000; ++trial) {
+        auto input = original;
+        const auto changes = 1 + random() % 6;
+        for (unsigned change = 0; change < changes; ++change) {
+            const auto at = random() % (input.size() + 1);
+            const auto c = static_cast<wchar_t>(random() % 256);
+            switch (random() % 3) {
+            case 0: input.insert(input.begin() + static_cast<std::ptrdiff_t>(at), c); break;
+            case 1: if (at < input.size()) input[at] = c; break;
+            default: if (at < input.size()) input.erase(at, 1); break;
+            }
+        }
+        const auto action = parseNotificationAction(input);
+        if (!action) continue;
+        CHECK(!action->sessionId.empty() && action->sessionId.size() <= 96);
+        for (const unsigned char c : action->sessionId)
+            CHECK((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                  (c >= 'a' && c <= 'z') || c == '-');
+        const std::wstring rebuilt = std::wstring(L"pomodoro-native://") +
+            (action->command == NotificationCommand::Stop ? L"stop/" : L"open/") +
+            (action->timer == TimerKind::Pomodoro ? L"pomodoro/" : L"countdown/") +
+            std::wstring(action->sessionId.begin(), action->sessionId.end());
+        CHECK(input == rebuilt);
+    }
+}
+
 void staleAndTestActionsCannotStopCurrentSessions() {
     TimerEngine engine;
     CHECK(engine.startPomodoro({1'000, 1'000, 1}, 0, "current-pomo"));
@@ -305,12 +353,13 @@ int main() {
         overdueAndSimultaneousEventsStayGroupedByTimer();
         actionButtonsAndSoundUseSafeXml();
         onlyExactApplicationUrisAreAccepted();
+        hostileProtocolInputsCannotChangeTheAcceptedCommand();
         staleAndTestActionsCannotStopCurrentSessions();
         latestNoticeReplacesOnlyItsOwnTimer();
         rejectedRequestsRetryAtFiveAndTenSecondsThenStop();
         resetAndNewSessionsDiscardOldQueuedActions();
         missingWindowsSettingsStillAttemptsDeliveryWithoutBypassingPolicy();
-        std::cout << "9 notification scenarios passed\n";
+        std::cout << "10 notification scenarios passed (20,000 hostile URI mutations)\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

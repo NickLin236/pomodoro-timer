@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.5 — November 18, 2026
+
+- Generate new notification session IDs from 128 bits of operating-system entropy instead of predictable timestamps and counters. Starting a timer fails safely if secure randomness is unavailable; existing saved sessions remain readable.
+- Explicitly enable ASLR, high-entropy ASLR, NX compatibility, and relocation data on Windows executables. MSVC builds also restrict implicit DLL loading to System32 on supported Windows versions.
+- Verify executable protection metadata in Windows CI before running tests or packaging a release.
+- Add reproducible security harnesses for malformed saved state, notification URI mutation, and isolated filesystem-link attacks, plus regressions for secure-session failure and stale notification actions.
+
+The local security review found no demonstrated code-execution or privilege-escalation exploit. The previous local MinGW build lacked ASLR support; this was a confirmed hardening gap. Predictable protocol action IDs and DLL search behavior were hardened without claiming a reproduced remote exploit. Existing sessions retain their old IDs until reset and started again. See [the security report](Docs/Security_Review.md) for scope, evidence, and Windows validation limits.
+
 ## 1.2.4 — November 17, 2026
 
 - Follow the actual window-parent chain when measuring taskbar widgets. Reparented popup-style windows can retain a different owner; that owner must not determine taskbar clipping or visibility.

@@ -9,3 +9,6 @@
 *.suo
 *.zip
 *.tmp
+# Python tooling caches
+__pycache__/
+*.pyc

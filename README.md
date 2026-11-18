@@ -48,4 +48,4 @@ cmake --build --preset portable
 ctest --preset portable
 ```
 
-More details: [Behavior](Docs/Behavior.md) · [Windows checklist](Docs/Windows_Test_Checklist.md) · [Publishing releases](Docs/GitHub_Releases.md) · [Changelog](CHANGELOG.md).
+More details: [Behavior](Docs/Behavior.md) · [Windows checklist](Docs/Windows_Test_Checklist.md) · [Security review](Docs/Security_Review.md) · [Publishing releases](Docs/GitHub_Releases.md) · [Changelog](CHANGELOG.md).
