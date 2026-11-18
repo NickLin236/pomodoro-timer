@@ -351,6 +351,12 @@ Preferences decodePreferences(const std::string& text) {
     result.countdownDurationMs = integer<Millis>(field(document, "countdownDurationMs"));
     if (!validateDuration(result.countdownDurationMs)) invalid("countdown duration out of range");
     result.soundEnabled = boolean(field(document, "soundEnabled"));
+    // Schema 1 settings written before volume control use the original level.
+    const auto soundVolume = document.object.find("soundVolumePercent");
+    if (soundVolume != document.object.end())
+        result.soundVolumePercent = integer<int>(soundVolume->second);
+    if (result.soundVolumePercent < 0 || result.soundVolumePercent > maxSoundVolumePercent)
+        invalid("sound volume out of range");
     result.startAtSignIn = boolean(field(document, "startAtSignIn"));
     // Schema 1 files written before taskbar status support have no such field.
     // Preserve their valid timer settings and opt into the new display default.
@@ -409,6 +415,7 @@ std::string encodePreferences(const Preferences& value) {
     const auto result = "{\n  \"version\":1,\n  \"pomodoro\":" + encodeConfig(value.pomodoro) +
         ",\n  \"countdownDurationMs\":" + std::to_string(value.countdownDurationMs) +
         ",\n  \"soundEnabled\":" + (value.soundEnabled ? "true" : "false") +
+        ",\n  \"soundVolumePercent\":" + std::to_string(value.soundVolumePercent) +
         ",\n  \"startAtSignIn\":" + (value.startAtSignIn ? "true" : "false") +
         ",\n  \"showTaskbarStatus\":" + (value.showTaskbarStatus ? "true" : "false") +
         ",\n  \"backgroundMode\":" + quote(value.backgroundMode == BackgroundMode::TrayOnly ? "trayOnly" : "keepTaskbar") +

@@ -9,11 +9,13 @@ namespace pomodoro {
 
 enum class BackgroundMode { TrayOnly, KeepTaskbar };
 enum class TaskbarSource { Pomodoro, Countdown };
+inline constexpr int maxSoundVolumePercent = 200;
 
 struct Preferences {
     PomodoroConfig pomodoro;
     Millis countdownDurationMs = 5 * 60 * 1000;
     bool soundEnabled = true;
+    int soundVolumePercent = 100;
     bool startAtSignIn = false;
     bool showTaskbarStatus = true;
     // Retained for settings-file compatibility; minimize now always uses tray.

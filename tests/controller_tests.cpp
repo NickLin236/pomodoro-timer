@@ -259,9 +259,17 @@ void preferenceEditsApplyToTheNextSession() {
     preferences.backgroundMode = BackgroundMode::KeepTaskbar;
     preferences.taskbarSource = TaskbarSource::Countdown;
     preferences.soundEnabled = false;
+    preferences.soundVolumePercent = 175;
     CHECK(controller.savePreferences(preferences));
     CHECK(controller.engine().pomodoro.config.focusMs == 6'000);
     CHECK(controller.engine().pomodoro.config.cycles == 2);
+    for (const int volume : {-1, maxSoundVolumePercent + 1}) {
+        auto invalidVolume = preferences;
+        invalidVolume.soundVolumePercent = volume;
+        CHECK(!controller.savePreferences(invalidVolume));
+        CHECK(controller.preferences().soundVolumePercent == 175);
+        CHECK(store.loadPreferences().value.soundVolumePercent == 175);
+    }
     CHECK(controller.engine().countdown.durationMs == 5'000);
     auto invalid = preferences;
     invalid.pomodoro.cycles = 0;
@@ -278,6 +286,7 @@ void preferenceEditsApplyToTheNextSession() {
     CHECK(restarted.preferences().backgroundMode == BackgroundMode::KeepTaskbar);
     CHECK(restarted.preferences().taskbarSource == TaskbarSource::Countdown);
     CHECK(!restarted.preferences().soundEnabled);
+    CHECK(restarted.preferences().soundVolumePercent == 175);
     CHECK(restarted.engine().pomodoroRemaining(restarted.now()) == 9'000);
 }
 

@@ -33,7 +33,8 @@ enum Command : int {
     SecondsInput, CountdownAction, CountdownReset, SaveCountdown,
     SoundCheck, StartupCheck, BackgroundCombo, TaskbarCombo, SaveSettings,
     TestNotification, OpenWindow, OpenSettings, ExitApplication,
-    TogglePomodoro, ToggleCountdown, StatusCheck, CopyDiagnostics, VersionLabel
+    TogglePomodoro, ToggleCountdown, StatusCheck, CopyDiagnostics, VersionLabel,
+    SoundVolumeSlider, SoundVolumeValue
 };
 
 std::wstring wide(const std::string& text) {
@@ -201,21 +202,31 @@ private:
 
         sound_ = add(L"BUTTON", L"Play notification sound", WS_TABSTOP | BS_AUTOCHECKBOX,
                      SoundCheck, 2, 28, 76, 580, 30);
+        label(L"Sound volume", 2, 28, 118, 145);
+        volume_ = add(TRACKBAR_CLASSW, L"Notification sound volume", WS_TABSTOP | TBS_AUTOTICKS,
+                      SoundVolumeSlider, 2, 178, 109, 350, 38);
+        SendMessageW(volume_, TBM_SETRANGE, TRUE, MAKELPARAM(0, maxSoundVolumePercent));
+        SendMessageW(volume_, TBM_SETPOS, TRUE, 100);
+        SendMessageW(volume_, TBM_SETTICFREQ, 50, 0);
+        SendMessageW(volume_, TBM_SETPAGESIZE, 0, 10);
+        volumeValue_ = add(L"STATIC", L"100%", SS_LEFT, SoundVolumeValue, 2, 548, 118, 70, 24);
+        label(L"0% mute; 100% normal; up to 200% boost. Windows volume still applies.",
+              2, 28, 153, 590, 24);
         startup_ = add(L"BUTTON", L"Start when I sign in (launch in background)", WS_TABSTOP | BS_AUTOCHECKBOX,
-                       StartupCheck, 2, 28, 118, 590, 30);
-        label(L"Install in a stable folder before enabling sign-in startup.", 2, 48, 153, 550, 40);
+                       StartupCheck, 2, 28, 184, 590, 30);
+        label(L"Install in a stable folder before enabling sign-in startup.", 2, 48, 219, 550, 28);
         statusCheck_ = add(L"BUTTON", L"Show timer status in taskbar", WS_TABSTOP | BS_AUTOCHECKBOX,
-                           StatusCheck, 2, 28, 208, 590, 30);
-        label(L"Shows the active timer or Pomodoro phase and remaining time.", 2, 48, 243, 550, 40);
-        label(L"Preferred taskbar timer when both are active", 2, 28, 288, 570);
+                           StatusCheck, 2, 28, 256, 590, 30);
+        label(L"Shows the active timer or Pomodoro phase and remaining time.", 2, 48, 291, 550, 28);
+        label(L"Preferred taskbar timer when both are active", 2, 28, 328, 570);
         source_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | CBS_DROPDOWNLIST,
-                      TaskbarCombo, 2, 28, 318, 530, 130);
+                      TaskbarCombo, 2, 28, 358, 530, 130);
         ComboBox_AddString(source_, L"Pomodoro"); ComboBox_AddString(source_, L"General timer");
-        button(L"Save settings", SaveSettings, 2, 28, 385, 140);
-        button(L"Test notification", TestNotification, 2, 190, 385, 180);
-        button(L"Copy taskbar diagnostics", CopyDiagnostics, 2, 390, 385, 220);
+        button(L"Save settings", SaveSettings, 2, 28, 400, 140);
+        button(L"Test notification", TestNotification, 2, 190, 400, 180);
+        button(L"Copy taskbar diagnostics", CopyDiagnostics, 2, 390, 400, 220);
         label(L"Minimize hides the app in the notification area. Close exits.\r\nNotifications depend on your Windows notification settings.",
-              2, 28, 436, 590, 42);
+              2, 28, 442, 590, 42);
         const auto version = L"Pomodoro " + wide(POMODORO_VERSION);
         add(L"STATIC", version.c_str(), SS_LEFT, VersionLabel, 2, 28, 486, 590, 20);
         status_ = label(L"Ready. Minimize hides the app; Close and Exit save and quit.", -1, 28, 514, 590, 65);
@@ -381,10 +392,13 @@ private:
         else if (message == WM_SETFOCUS)
             PostMessageW(self->window_, revealFocusMessage, reinterpret_cast<WPARAM>(control), 0);
         else if (message == WM_MOUSEWHEEL) {
+            if (control == self->volume_ && GetFocus() == control)
+                return DefSubclassProc(control, message, wParam, lParam);
             if (control == self->source_ && ComboBox_GetDroppedState(control))
                 return DefSubclassProc(control, message, wParam, lParam);
             return SendMessageW(self->window_, message, wParam, lParam);
         } else if (message == WM_KEYDOWN && (wParam == VK_PRIOR || wParam == VK_NEXT)) {
+            if (control == self->volume_) return DefSubclassProc(control, message, wParam, lParam);
             if (control == self->source_ && ComboBox_GetDroppedState(control))
                 return DefSubclassProc(control, message, wParam, lParam);
             self->scroll(true, wParam == VK_PRIOR ? SB_PAGEUP : SB_PAGEDOWN);
@@ -401,8 +415,20 @@ private:
         Millis seconds = preferences.countdownDurationMs / 1000;
         setNumber(hours_, seconds / 3600); setNumber(minutes_, seconds / 60 % 60); setNumber(seconds_, seconds % 60);
         Button_SetCheck(sound_, preferences.soundEnabled ? BST_CHECKED : BST_UNCHECKED);
+        SendMessageW(volume_, TBM_SETPOS, TRUE, preferences.soundVolumePercent);
+        updateSoundVolume();
         Button_SetCheck(statusCheck_, preferences.showTaskbarStatus ? BST_CHECKED : BST_UNCHECKED);
         ComboBox_SetCurSel(source_, preferences.taskbarSource == TaskbarSource::Pomodoro ? 0 : 1);
+    }
+    int soundVolume() const {
+        return static_cast<int>(SendMessageW(volume_, TBM_GETPOS, 0, 0));
+    }
+    void updateSoundVolume() {
+        const auto enabled = Button_GetCheck(sound_) == BST_CHECKED;
+        EnableWindow(volume_, enabled);
+        EnableWindow(volumeValue_, enabled);
+        const auto text = std::to_wstring(soundVolume()) + L"%";
+        SetWindowTextW(volumeValue_, text.c_str());
     }
     void setNumber(HWND control, Millis value) { SetWindowTextW(control, std::to_wstring(value).c_str()); }
     bool number(HWND control, Millis maximum, Millis& result) {
@@ -610,6 +636,7 @@ private:
     void command(int id) {
         showUpdate(controller_.poll());
         switch (id) {
+        case SoundCheck: updateSoundVolume(); break;
         case OpenWindow: open(); break;
         case OpenSettings: TabCtrl_SetCurSel(tabs_, 2); choosePage(2); open(); break;
         case CopyDiagnostics:
@@ -668,6 +695,7 @@ private:
         case SaveSettings: {
             auto prefs = controller_.preferences();
             prefs.soundEnabled = Button_GetCheck(sound_) == BST_CHECKED;
+            prefs.soundVolumePercent = soundVolume();
             prefs.startAtSignIn = Button_GetCheck(startup_) == BST_CHECKED;
             prefs.showTaskbarStatus = Button_GetCheck(statusCheck_) == BST_CHECKED;
             prefs.taskbarSource = ComboBox_GetCurSel(source_) == 0 ? TaskbarSource::Pomodoro : TaskbarSource::Countdown;
@@ -778,7 +806,10 @@ private:
             if (wParam != SIZE_MINIMIZED) updateScrollBars();
             return 0;
         case WM_VSCROLL: scroll(true, LOWORD(wParam)); return 0;
-        case WM_HSCROLL: scroll(false, LOWORD(wParam)); return 0;
+        case WM_HSCROLL:
+            if (reinterpret_cast<HWND>(lParam) == volume_) updateSoundVolume();
+            else scroll(false, LOWORD(wParam));
+            return 0;
         case WM_MOUSEWHEEL: {
             wheelDelta_ += GET_WHEEL_DELTA_WPARAM(wParam);
             const int detents = wheelDelta_ / WHEEL_DELTA;
@@ -861,7 +892,7 @@ private:
     std::string lastStorageWarning_;
     HWND tabs_{}, focus_{}, break_{}, cycles_{}, pomodoroTime_{}, pomodoroPhase_{}, pomodoroCaptured_{}, pomodoroAction_{}, skip_{};
     HWND hours_{}, minutes_{}, seconds_{}, countdownTime_{}, countdownStatus_{}, countdownAction_{};
-    HWND sound_{}, startup_{}, statusCheck_{}, source_{}, status_{};
+    HWND sound_{}, volume_{}, volumeValue_{}, startup_{}, statusCheck_{}, source_{}, status_{};
 };
 
 struct HandleCloser { void operator()(void* handle) const { if (handle) CloseHandle(handle); } };
@@ -920,7 +951,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     try {
         ComLifetime com;
         SetCurrentProcessExplicitAppUserModelID(L"PomodoroNative.Desktop");
-        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
         if (!InitCommonControlsEx(&controls)) throw std::runtime_error("Could not initialize Windows controls.");
         StateStore store(dataDirectory());
         WindowsClock clock;

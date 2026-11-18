@@ -130,7 +130,8 @@ void Controller::resetCountdown() {
 }
 
 bool Controller::savePreferences(const Preferences& preferences) {
-    if (!validateConfig(preferences.pomodoro) || !validateDuration(preferences.countdownDurationMs)) return false;
+    if (!validateConfig(preferences.pomodoro) || !validateDuration(preferences.countdownDurationMs) ||
+        preferences.soundVolumePercent < 0 || preferences.soundVolumePercent > maxSoundVolumePercent) return false;
     try {
         store_.savePreferences(preferences);
         preferences_ = preferences;

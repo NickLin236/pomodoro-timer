@@ -703,6 +703,24 @@ void settingsAndCloseBehavior() {
     MainWindow app(GetModuleHandleW(nullptr), store, clock);
     HiddenWindow hidden(app);
     const auto window = app.handle();
+    const auto volume = GetDlgItem(window, SoundVolumeSlider);
+    const auto volumeValue = GetDlgItem(window, SoundVolumeValue);
+    require(volume && volumeValue, "Sound volume controls are missing");
+    require(SendMessageW(volume, TBM_GETRANGEMIN, 0, 0) == 0 &&
+            SendMessageW(volume, TBM_GETRANGEMAX, 0, 0) == 200,
+            "Sound volume range must be 0 through 200 percent");
+    SendMessageW(volume, TBM_SETPOS, TRUE, 175);
+    SendMessageW(window, WM_HSCROLL, MAKEWPARAM(TB_THUMBPOSITION, 175), reinterpret_cast<LPARAM>(volume));
+    wchar_t volumeText[32]{};
+    GetWindowTextW(volumeValue, volumeText, 32);
+    require(std::wstring(volumeText) == L"175%", "Sound volume display did not follow the slider");
+    const auto soundCheckbox = GetDlgItem(window, SoundCheck);
+    Button_SetCheck(soundCheckbox, BST_UNCHECKED);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(SoundCheck, BN_CLICKED), reinterpret_cast<LPARAM>(soundCheckbox));
+    require(!IsWindowEnabled(volume), "Disabled sound left its volume control enabled");
+    Button_SetCheck(soundCheckbox, BST_CHECKED);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(SoundCheck, BN_CLICKED), reinterpret_cast<LPARAM>(soundCheckbox));
+    require(IsWindowEnabled(volume), "Sound volume control did not re-enable");
     const auto checkbox = GetDlgItem(window, StartupCheck);
     require(checkbox != nullptr, "Startup checkbox is missing");
     const auto statusCheckbox = GetDlgItem(window, StatusCheck);
@@ -723,6 +741,7 @@ void settingsAndCloseBehavior() {
     saveSettings();
     require(!readStartup(), "Saving startup Off did not remove an old executable path");
     require(store.loadPreferences().warning.empty(), "UI preferences did not persist");
+    require(store.loadPreferences().value.soundVolumePercent == 175, "Sound volume did not persist from Settings");
     require(!store.loadPreferences().value.showTaskbarStatus, "Taskbar status Off preference did not persist");
 
     Button_SetCheck(checkbox, BST_CHECKED);
@@ -835,7 +854,7 @@ int main(int count, char** arguments) {
             return foreignTaskbarHelper(count, arguments, false, true);
         ComLifetime com;
         require(SUCCEEDED(com.status), "Could not initialize COM for native UI test");
-        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_COOL_CLASSES};
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_COOL_CLASSES | ICC_BAR_CLASSES};
         require(InitCommonControlsEx(&controls) != FALSE, "Could not initialize native controls");
         notificationXmlUsesWindowsRuntimeWithoutSending();
         taskbarStatusUsesOnlyItsSyntheticHost();

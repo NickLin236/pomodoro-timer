@@ -138,11 +138,13 @@ void missingAndRoundTrips() {
     CHECK(emptyPreferences.warning.empty());
     CHECK(emptyPreferences.value.pomodoro.focusMs == 25 * 60000);
     CHECK(emptyPreferences.value.showTaskbarStatus);
+    CHECK(emptyPreferences.value.soundVolumePercent == 100);
 
     Preferences preferences;
     preferences.pomodoro = {12345, 6789, 11};
     preferences.countdownDurationMs = 12345678;
     preferences.soundEnabled = false;
+    preferences.soundVolumePercent = 175;
     preferences.startAtSignIn = true;
     preferences.showTaskbarStatus = false;
     preferences.backgroundMode = BackgroundMode::KeepTaskbar;
@@ -155,6 +157,7 @@ void missingAndRoundTrips() {
     CHECK(loaded.value.pomodoro.cycles == 11);
     CHECK(loaded.value.countdownDurationMs == 12345678);
     CHECK(!loaded.value.soundEnabled);
+    CHECK(loaded.value.soundVolumePercent == 175);
     CHECK(loaded.value.startAtSignIn);
     CHECK(!loaded.value.showTaskbarStatus);
     CHECK(loaded.value.backgroundMode == BackgroundMode::KeepTaskbar);
@@ -176,6 +179,44 @@ void missingAndRoundTrips() {
     CHECK(recovered.value.countdown.status == Status::Completed);
     CHECK(recovered.value.countdownNotificationSequence == 1);
     CHECK(recovered.value.countdown.transitionSequence == 1);
+}
+
+void soundVolumeSettingsValidateBoundsAndLegacyDefaults() {
+    Fixture fixture;
+    Preferences preferences;
+    preferences.soundEnabled = false;
+    for (const int volume : {0, 75, 100, maxSoundVolumePercent}) {
+        preferences.soundVolumePercent = volume;
+        fixture.store.savePreferences(preferences);
+        const auto loaded = fixture.store.loadPreferences();
+        CHECK(loaded.warning.empty());
+        CHECK(loaded.value.soundVolumePercent == volume);
+        CHECK(!loaded.value.soundEnabled);
+    }
+    const auto current = read(fixture.path / "settings.json");
+    const auto legacy = replace(current, ",\n  \"soundVolumePercent\":200", "");
+    write(fixture.path / "settings.json", legacy);
+    const auto loadedLegacy = fixture.store.loadPreferences();
+    CHECK(loadedLegacy.warning.empty());
+    CHECK(!loadedLegacy.recoveredFromBackup);
+    CHECK(loadedLegacy.value.soundVolumePercent == 100);
+    CHECK(!loadedLegacy.value.soundEnabled);
+
+    std::filesystem::remove(fixture.path / "settings.json.bak");
+    for (const auto* value : {"-1", "201", "100.5", "100.0", "1e2", "true", "\"100\"", "null", "2147483648"}) {
+        write(fixture.path / "settings.json",
+            replace(current, "\"soundVolumePercent\":200", std::string("\"soundVolumePercent\":") + value));
+        CHECK(!fixture.store.loadPreferences().warning.empty());
+    }
+    write(fixture.path / "settings.json", current);
+    for (const int volume : {-1, maxSoundVolumePercent + 1}) {
+        preferences.soundVolumePercent = volume;
+        bool rejected = false;
+        try { fixture.store.savePreferences(preferences); }
+        catch (const std::exception&) { rejected = true; }
+        CHECK(rejected);
+        CHECK(read(fixture.path / "settings.json") == current);
+    }
 }
 
 void taskbarStatusSettingsRemainBackwardCompatible() {
@@ -436,6 +477,7 @@ int main() {
         staleTemporaryFilesDoNotPreventSave();
         numericSerializationIgnoresUserLocale();
         missingAndRoundTrips();
+        soundVolumeSettingsValidateBoundsAndLegacyDefaults();
         taskbarStatusSettingsRemainBackwardCompatible();
         restartRecoveryAndPause();
         backwardClockRecoveryCanBePausedAndSaved();
